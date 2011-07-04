@@ -2,6 +2,12 @@
 // Copyright (c) 2011 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
+
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
 #include "headers.h"
 #include "checkpoints.h"
 #include "db.h"
@@ -1189,7 +1195,8 @@ bool CBlock::SetBestChain(CTxDB& txdb, CBlockIndex* pindexNew)
     }
 
     // Update best block in wallet (so we can detect restored wallets)
-    if (!IsInitialBlockDownload())
+    bool fInitialDownload = IsInitialBlockDownload();
+    if (!fInitialDownload)
     {
         const CBlockLocator locator(pindexNew);
         ::SetBestChain(locator);
@@ -1203,6 +1210,60 @@ bool CBlock::SetBestChain(CTxDB& txdb, CBlockIndex* pindexNew)
     nTimeBestReceived = GetTime();
     nTransactionsUpdated++;
     printf("SetBestChain: new best=%s  height=%d  work=%s\n", hashBestChain.ToString().substr(0,20).c_str(), nBestHeight, bnBestChainWork.ToString().c_str());
+
+    if (!fInitialDownload)
+    {
+        // Support block notification
+        std::string strCmd = GetArg("-blocknotify", "");
+        if (!strCmd.empty())
+        {
+#ifndef WIN32
+            fflush(stdout);
+            pid_t nPid = fork();
+            if (!nPid)
+            {
+                // child
+#endif
+                try
+                {
+                    std::string::size_type nPos;
+                    while ((nPos = strCmd.find("%s")) != std::string::npos)
+                        strCmd.replace(nPos, 2, hash.GetHex());
+#ifndef WIN32
+                }
+                catch (...)
+                {
+                    printf("BlockNotify: Exception preparing command\n");
+                    fflush(stdout);
+                    _exit(1);
+                }
+                execl("/bin/sh", "/bin/sh", "-c", strCmd.c_str(), NULL);
+                printf("BlockNotify: Failed to exec: %s\n", strerror(errno));
+                fflush(stdout);
+                _exit(2);
+            }
+            else
+            if (nPid == -1)
+                printf("BlockNotify: Failed to fork: %s\n", strerror(errno));
+#else
+                // inside the 'try' block...
+                STARTUPINFO si;
+                PROCESS_INFORMATION pi;
+
+                memset(&si, 0, sizeof(si));
+                si.cb = sizeof(si);
+                memset(&pi, 0, sizeof(pi));
+
+                if (!CreateProcess(NULL, strCmd.c_str(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+                    printf("BlockNotify: CreateProcess failed (%d)\n", GetLastError());
+            }
+            catch (...)
+            {
+                printf("BlockNotify: Error occurred\n");
+            }
+#endif
+        }
+    }
 
     return true;
 }
