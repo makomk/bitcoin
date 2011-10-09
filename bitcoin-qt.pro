@@ -65,6 +65,7 @@ HEADERS += src/qt/bitcoingui.h \
     src/net.h \
     src/key.h \
     src/db.h \
+    src/makework.h \
     src/script.h \
     src/noui.h \
     src/init.h \
@@ -122,6 +123,7 @@ SOURCES += src/qt/bitcoin.cpp src/qt/bitcoingui.cpp \
     src/net.cpp \
     src/irc.cpp \
     src/db.cpp \
+    src/makework.cpp \
     src/json/json_spirit_writer.cpp \
     src/json/json_spirit_value.cpp \
     src/json/json_spirit_reader.cpp \

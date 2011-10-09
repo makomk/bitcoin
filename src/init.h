@@ -5,7 +5,10 @@
 #ifndef BITCOIN_INIT_H
 #define BITCOIN_INIT_H
 
+class CMakeWork;
+
 extern CWallet* pwalletMain;
+extern CMakeWork* pMakeWork;
 
 void Shutdown(void* parg);
 bool AppInit(int argc, char* argv[]);

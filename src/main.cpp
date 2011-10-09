@@ -6,6 +6,7 @@
 #include "db.h"
 #include "net.h"
 #include "init.h"
+#include "makework.h"
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 
@@ -1183,6 +1184,11 @@ bool CBlock::SetBestChain(CTxDB& txdb, CBlockIndex* pindexNew)
     nTimeBestReceived = GetTime();
     nTransactionsUpdated++;
     printf("SetBestChain: new best=%s  height=%d  work=%s\n", hashBestChain.ToString().substr(0,20).c_str(), nBestHeight, bnBestChainWork.ToString().c_str());
+
+    if (!IsInitialBlockDownload())
+    {
+        pMakeWork->UpdateWork(true);
+    }
 
     return true;
 }

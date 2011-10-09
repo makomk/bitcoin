@@ -8,6 +8,7 @@
 #include "net.h"
 #include "init.h"
 #include "strlcpy.h"
+#include "makework.h"
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/interprocess/sync/file_lock.hpp>
@@ -16,6 +17,7 @@ using namespace std;
 using namespace boost;
 
 CWallet* pwalletMain;
+CMakeWork* pMakeWork;
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -396,6 +398,9 @@ bool AppInit2(int argc, char* argv[])
 
     // Add wallet transactions that aren't already in a block to mapTransactions
     pwalletMain->ReacceptWalletTransactions();
+
+    // Initialize getwork generator
+    pMakeWork = new CMakeWork();
 
     //
     // Parameters

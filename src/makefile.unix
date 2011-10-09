@@ -73,6 +73,7 @@ HEADERS = \
     key.h \
     keystore.h \
     main.h \
+    makework.h \
     net.h \
     noui.h \
     protocol.h \
@@ -91,6 +92,7 @@ OBJS= \
     obj/irc.o \
     obj/keystore.o \
     obj/main.o \
+    obj/makework.o \
     obj/net.o \
     obj/protocol.o \
     obj/bitcoinrpc.o \
