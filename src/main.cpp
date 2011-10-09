@@ -1221,6 +1221,8 @@ bool CBlock::AddToBlockIndex(unsigned int nFile, unsigned int nBlockPos)
     if (!txdb.TxnCommit())
         return false;
 
+    uint256 hashCoinBase = vtx[0].GetHash();
+
     // New best
     if (pindexNew->bnChainWork > bnBestChainWork)
         if (!SetBestChain(txdb, pindexNew))
@@ -1233,7 +1235,7 @@ bool CBlock::AddToBlockIndex(unsigned int nFile, unsigned int nBlockPos)
         // Notify UI to display prev block's coinbase if it was ours
         static uint256 hashPrevBestCoinBase;
         UpdatedTransaction(hashPrevBestCoinBase);
-        hashPrevBestCoinBase = vtx[0].GetHash();
+        hashPrevBestCoinBase = hashCoinBase;
     }
 
     MainFrameRepaint();
