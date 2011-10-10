@@ -21,13 +21,23 @@ struct WorkDesc
     uint256 hashTarget;
 };
 
+struct WorkDescEx
+{
+    char pdata[128];
+    uint256 hashTarget;
+    CTransaction coinbaseTx;
+    std::vector<uint256> merkle;
+};
+
 class CMakeWork
 {
 public:
     CMakeWork() : reservekey(pwalletMain), pindexPrev(NULL), pCurBlock(NULL), nExtraNonce(0) {};
     void UpdateWork(bool fast = false);
     void GetWork(WorkDesc &work);
+    void GetWorkEx(WorkDescEx &work);
     bool SubmitWork(unsigned char *data);
+    bool SubmitWorkEx(unsigned char *data, const std::vector<unsigned char> &coinbase);
 private:
     typedef std::map<uint256, std::pair<CBlock*, CScript> > mapNewBlock_t;
     mapNewBlock_t mapNewBlock;

@@ -67,7 +67,44 @@ void CMakeWork::GetWork(WorkDesc &work)
     work.hashTarget = CBigNum().SetCompact(pCurBlock->nBits).getuint256();
 }
 
+void CMakeWork::GetWorkEx(WorkDescEx &work)
+{
+    // Update block
+    if (pindexPrev != pindexBest ||
+        (nTransactionsUpdated != nTransactionsUpdatedLast && GetTime() - nStart > 60))
+    {
+        UpdateWork();
+    }
+
+    // Update nTime
+    pCurBlock->nTime = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
+    pCurBlock->nNonce = 0;
+
+    // Update nExtraNonce
+    static unsigned int nExtraNonce = 0;
+    IncrementExtraNonce(pCurBlock, pindexPrev, nExtraNonce);
+
+    // Save
+    mapNewBlock[pCurBlock->hashMerkleRoot] = make_pair(pCurBlock, pCurBlock->vtx[0].vin[0].scriptSig);
+
+    // Prebuild hash buffers
+    char pmidstate[32];
+    char phash1[64];
+    FormatHashBuffers(pCurBlock, pmidstate, work.pdata, phash1);
+
+    work.hashTarget = CBigNum().SetCompact(pCurBlock->nBits).getuint256();
+
+    work.coinbaseTx = pCurBlock->vtx[0];
+    work.merkle = pCurBlock->GetMerkleBranch(0);
+}
+
 bool CMakeWork::SubmitWork(unsigned char *data)
+{
+	std::vector<unsigned char> coinbase;
+	return SubmitWorkEx(data, coinbase);
+} 
+
+bool CMakeWork::SubmitWorkEx(unsigned char *data, const std::vector<unsigned char> &coinbase)
 {
     CBlock* pdata = (CBlock*)data;
 
@@ -82,7 +119,11 @@ bool CMakeWork::SubmitWork(unsigned char *data)
 
     pblock->nTime = pdata->nTime;
     pblock->nNonce = pdata->nNonce;
-    pblock->vtx[0].vin[0].scriptSig = mapNewBlock[pdata->hashMerkleRoot].second;
+    if(coinbase.size() == 0)
+        pblock->vtx[0].vin[0].scriptSig = mapNewBlock[pdata->hashMerkleRoot].second;
+    else
+        CDataStream(coinbase) >> pblock->vtx[0]; // FIXME - HACK!
+
     pblock->hashMerkleRoot = pblock->BuildMerkleTree();
 
     return CheckWork(pblock, *pwalletMain, reservekey);

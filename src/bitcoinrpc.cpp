@@ -1645,6 +1645,55 @@ Value getwork(const Array& params, bool fHelp)
 }
 
 
+Value getworkex(const Array& params, bool fHelp)
+{
+    if (fHelp || (params.size() != 0 && params.size() != 2))
+        throw runtime_error("getworkex [<origmerkle> <ntime> <nonce> <coinbase>]");
+
+    if (vNodes.empty())
+        throw JSONRPCError(-9, "Bitcoin is not connected!");
+
+    if (IsInitialBlockDownload())
+        throw JSONRPCError(-10, "Bitcoin is downloading blocks...");
+
+    if (params.size() == 0)
+    {
+        WorkDescEx work;
+        pMakeWork->GetWorkEx(work);
+
+        Object result;
+        result.push_back(Pair("data",     HexStr(BEGIN(work.pdata), END(work.pdata))));
+        result.push_back(Pair("target",   HexStr(BEGIN(work.hashTarget), END(work.hashTarget))));
+
+        CDataStream ssTx;
+        ssTx << work.coinbaseTx;
+        result.push_back(Pair("coinbase", HexStr(ssTx.begin(), ssTx.end())));
+
+        Array merkle;
+	printf("DEBUG: merkle size %i\n", work.merkle.size());
+        BOOST_FOREACH(uint256 merkleh, work.merkle) {
+	    printf("%s\n", merkleh.ToString().c_str());
+            merkle.push_back(HexStr(BEGIN(merkleh), END(merkleh)));
+        }
+        result.push_back(Pair("merkle", merkle));
+        return result;
+    }
+    else
+    {
+        // Parse parameters
+        vector<unsigned char> vchData = ParseHex(params[0].get_str());
+	vector<unsigned char> coinbase;
+        if (vchData.size() != 128)
+            throw JSONRPCError(-8, "Invalid parameter");
+        if(params.size() > 1)
+            coinbase = ParseHex(params[1].get_str());
+        return pMakeWork->SubmitWorkEx(&vchData[0], coinbase);
+        
+    }
+}
+
+
+
 Value getmemorypool(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
@@ -1776,6 +1825,7 @@ pair<string, rpcfn_type> pCallTable[] =
     make_pair("signmessage",           &signmessage),
     make_pair("verifymessage",         &verifymessage),
     make_pair("getwork",                &getwork),
+    make_pair("getworkex",                &getworkex),
     make_pair("listaccounts",           &listaccounts),
     make_pair("settxfee",               &settxfee),
     make_pair("getmemorypool",          &getmemorypool),
@@ -1805,6 +1855,7 @@ string pAllowInSafeMode[] =
     "walletlock",
     "validateaddress",
     "getwork",
+    "getworkex",
     "getmemorypool",
 };
 set<string> setAllowInSafeMode(pAllowInSafeMode, pAllowInSafeMode + sizeof(pAllowInSafeMode)/sizeof(pAllowInSafeMode[0]));
