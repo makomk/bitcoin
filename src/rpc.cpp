@@ -1804,6 +1804,7 @@ Value getauxblock(const Array& params, bool fHelp)
         Object result;
         result.push_back(Pair("target",   HexStr(BEGIN(hashTarget), END(hashTarget))));
         result.push_back(Pair("hash", pblock->GetHash().GetHex()));
+        result.push_back(Pair("prevhash", pblock->hashPrevBlock.GetHex()));
         result.push_back(Pair("chainid", pblock->GetChainID()));
         return result;
     }
