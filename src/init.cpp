@@ -22,10 +22,22 @@ Q_IMPORT_PLUGIN(qtwcodecs)
 Q_IMPORT_PLUGIN(qkrcodecs)
 #endif
 
+#ifndef WIN32
+#include <sys/wait.h>
+#endif
+
 using namespace std;
 using namespace boost;
 
 CWallet* pwalletMain;
+
+#ifndef WIN32
+void HandleSIGCHLD(int)
+{
+    int status;
+    while(waitpid(-1, &status, WNOHANG) > 0);
+}
+#endif
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -143,6 +155,10 @@ bool AppInit2(int argc, char* argv[])
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
+
+    // Reap zombie child processes
+    sa.sa_handler = HandleSIGCHLD;
+    sigaction(SIGCHLD, &sa, NULL);
 #endif
 
     //
