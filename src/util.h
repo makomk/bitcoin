@@ -25,19 +25,8 @@
 #include <openssl/ripemd.h>
 
 
-#if defined(_MSC_VER) || defined(__BORLANDC__)
-typedef __int64  int64;
-typedef unsigned __int64  uint64;
-#else
 typedef long long  int64;
 typedef unsigned long long  uint64;
-#endif
-#if defined(_MSC_VER) && _MSC_VER < 1300
-#define for  if (false) ; else for
-#endif
-#ifndef _MSC_VER
-#define __forceinline  inline
-#endif
 
 #define loop                for (;;)
 #define BEGIN(a)            ((char*)&(a))
@@ -53,7 +42,7 @@ typedef unsigned long long  uint64;
 #define snprintf my_snprintf
 
 #ifndef PRI64d
-#if defined(_MSC_VER) || defined(__BORLANDC__) || defined(__MSVCRT__)
+#if defined(_MSC_VER) || defined(__MSVCRT__)
 #define PRI64d  "I64d"
 #define PRI64u  "I64u"
 #define PRI64x  "I64x"
@@ -84,11 +73,7 @@ T* alignup(T* p)
 #ifdef WIN32
 #define MSG_NOSIGNAL        0
 #define MSG_DONTWAIT        0
-#ifndef UINT64_MAX
-#define UINT64_MAX          _UI64_MAX
-#define INT64_MAX           _I64_MAX
-#define INT64_MIN           _I64_MIN
-#endif
+
 #ifndef S_IRUSR
 #define S_IRUSR             0400
 #define S_IWUSR             0200
@@ -183,7 +168,6 @@ std::string DecodeBase64(const std::string& str);
 std::string EncodeBase64(const unsigned char* pch, size_t len);
 std::string EncodeBase64(const std::string& str);
 void ParseParameters(int argc, char* argv[]);
-const char* wxGetTranslation(const char* psz);
 bool WildcardMatch(const char* psz, const char* mask);
 bool WildcardMatch(const std::string& str, const std::string& mask);
 int GetFilesize(FILE* file);
@@ -205,7 +189,7 @@ void SetMockTime(int64 nMockTimeIn);
 int64 GetAdjustedTime();
 void AddTimeData(unsigned int ip, int64 nTime);
 std::string FormatFullVersion();
-
+std::string FormatSubVersion(const std::string& name, int nClientVersion, const std::vector<std::string>& comments);
 
 
 
@@ -243,19 +227,20 @@ public:
         pcs = &csIn;
         pcs->Enter(pszName, pszFile, nLine);
     }
+
+    operator bool() const
+    {
+        return true;
+    }
+
     ~CCriticalBlock()
     {
         pcs->Leave();
     }
 };
 
-// WARNING: This will catch continue and break!
-// break is caught with an assertion, but there's no way to detect continue.
-// I'd rather be careful than suffer the other more error prone syntax.
-// The compiler will optimise away all this loop junk.
 #define CRITICAL_BLOCK(cs)     \
-    for (bool fcriticalblockonce=true; fcriticalblockonce; assert(("break caught by CRITICAL_BLOCK!" && !fcriticalblockonce)), fcriticalblockonce=false) \
-        for (CCriticalBlock criticalblock(cs, #cs, __FILE__, __LINE__); fcriticalblockonce; fcriticalblockonce=false)
+    if (CCriticalBlock criticalblock = CCriticalBlock(cs, #cs, __FILE__, __LINE__))
 
 class CTryCriticalBlock
 {
@@ -267,6 +252,12 @@ public:
     {
         pcs = (csIn.TryEnter(pszName, pszFile, nLine) ? &csIn : NULL);
     }
+
+    operator bool() const
+    {
+        return Entered();
+    }
+
     ~CTryCriticalBlock()
     {
         if (pcs)
@@ -274,17 +265,20 @@ public:
             pcs->Leave();
         }
     }
-    bool Entered() { return pcs != NULL; }
+    bool Entered() const { return pcs != NULL; }
 };
 
 #define TRY_CRITICAL_BLOCK(cs)     \
-    for (bool fcriticalblockonce=true; fcriticalblockonce; assert(("break caught by TRY_CRITICAL_BLOCK!" && !fcriticalblockonce)), fcriticalblockonce=false) \
-        for (CTryCriticalBlock criticalblock(cs, #cs, __FILE__, __LINE__); fcriticalblockonce && (fcriticalblockonce = criticalblock.Entered()); fcriticalblockonce=false)
+    if (CTryCriticalBlock criticalblock = CTryCriticalBlock(cs, #cs, __FILE__, __LINE__))
 
 
 
 
 
+
+// This is exactly like std::string, but with a custom allocator.
+// (secure_allocator<> is defined in serialize.h)
+typedef std::basic_string<char, std::char_traits<char>, secure_allocator<char> > SecureString;
 
 
 
@@ -465,15 +459,6 @@ inline bool GetBoolArg(const std::string& strArg)
 
 
 
-inline void heapchk()
-{
-#ifdef WIN32
-    /// for debugging
-    //if (_heapchk() != _HEAPOK)
-    //    DebugBreak();
-#endif
-}
-
 // Randomize the stack to help protect against buffer overrun exploits
 #define IMPLEMENT_RANDOMIZE_STACK(ThreadFn)     \
     {                                           \
@@ -549,7 +534,7 @@ inline uint256 Hash(const T1 p1begin, const T1 p1end,
 }
 
 template<typename T>
-uint256 SerializeHash(const T& obj, int nType=SER_GETHASH, int nVersion=VERSION)
+uint256 SerializeHash(const T& obj, int nType=SER_GETHASH, int nVersion=PROTOCOL_VERSION)
 {
     // Most of the time is spent allocating and deallocating CDataStream's
     // buffer.  If this ever needs to be optimized further, make a CStaticStream
@@ -612,6 +597,16 @@ public:
         {
             return (vSorted[size/2-1] + vSorted[size/2]) / 2;
         }
+    }
+
+    int size() const
+    {
+        return vValues.size();
+    }
+
+    std::vector<T> sorted () const
+    {
+        return vSorted;
     }
 };
 

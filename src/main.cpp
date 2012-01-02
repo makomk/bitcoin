@@ -3,6 +3,7 @@
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #include "headers.h"
+#include "checkpoints.h"
 #include "db.h"
 #include "net.h"
 #include "init.h"
@@ -17,6 +18,11 @@ using namespace boost;
 // Global state
 //
 
+// Name of client reported in the 'version' message. Report the same name
+// for both bitcoind and bitcoin-qt, to make it harder for attackers to
+// target servers or GUI users specifically.
+const std::string CLIENT_NAME("bitcoin-qt");
+
 CCriticalSection cs_setpwalletRegistered;
 set<CWallet*> setpwalletRegistered;
 
@@ -30,8 +36,6 @@ map<COutPoint, CInPoint> mapNextTx;
 map<uint256, CBlockIndex*> mapBlockIndex;
 uint256 hashGenesisBlock("0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
 static CBigNum bnProofOfWorkLimit(~uint256(0) >> 32);
-const int nTotalBlocksEstimate = 140700; // Conservative estimate of total nr of blocks on main chain
-const int nInitialBlockThreshold = 120; // Regard blocks up until N-threshold as "initial download"
 CBlockIndex* pindexGenesisBlock = NULL;
 int nBestHeight = -1;
 CBigNum bnBestChainWork = 0;
@@ -71,6 +75,9 @@ int fUseUPnP = false;
 // dispatching functions
 //
 
+// These functions dispatch to one or all registered wallets
+
+
 void RegisterWallet(CWallet* pwalletIn)
 {
     CRITICAL_BLOCK(cs_setpwalletRegistered)
@@ -87,6 +94,7 @@ void UnregisterWallet(CWallet* pwalletIn)
     }
 }
 
+// check whether the passed transaction is from us
 bool static IsFromMe(CTransaction& tx)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
@@ -95,6 +103,7 @@ bool static IsFromMe(CTransaction& tx)
     return false;
 }
 
+// get the wallet transaction with the given hash (if it exists)
 bool static GetTransaction(const uint256& hashTx, CWalletTx& wtx)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
@@ -103,42 +112,49 @@ bool static GetTransaction(const uint256& hashTx, CWalletTx& wtx)
     return false;
 }
 
+// erases transaction with the given hash from all wallets
 void static EraseFromWallets(uint256 hash)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
         pwallet->EraseFromWallet(hash);
 }
 
+// make sure all wallets know about the given transaction, in the given block
 void static SyncWithWallets(const CTransaction& tx, const CBlock* pblock = NULL, bool fUpdate = false)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
         pwallet->AddToWalletIfInvolvingMe(tx, pblock, fUpdate);
 }
 
+// notify wallets about a new best chain
 void static SetBestChain(const CBlockLocator& loc)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
         pwallet->SetBestChain(loc);
 }
 
+// notify wallets about an updated transaction
 void static UpdatedTransaction(const uint256& hashTx)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
         pwallet->UpdatedTransaction(hashTx);
 }
 
+// dump all wallets
 void static PrintWallets(const CBlock& block)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
         pwallet->PrintWallet(block);
 }
 
+// notify wallets about an incoming inventory (for request counts)
 void static Inventory(const uint256& hash)
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
         pwallet->Inventory(hash);
 }
 
+// ask wallets to resend their transactions
 void static ResendWalletTransactions()
 {
     BOOST_FOREACH(CWallet* pwallet, setpwalletRegistered)
@@ -228,6 +244,68 @@ bool CTransaction::ReadFromDisk(COutPoint prevout)
     CTxDB txdb("r");
     CTxIndex txindex;
     return ReadFromDisk(txdb, prevout, txindex);
+}
+
+bool CTransaction::IsStandard() const
+{
+    BOOST_FOREACH(const CTxIn& txin, vin)
+    {
+        // Biggest 'standard' txin is a 3-signature 3-of-3 CHECKMULTISIG
+        // in an OP_EVAL, which is 3 ~80-byte signatures, 3
+        // ~65-byte public keys, plus a few script ops.
+        if (txin.scriptSig.size() > 500)
+            return error("nonstandard txin, size %d is too large\n", txin.scriptSig.size());
+        if (!txin.scriptSig.IsPushOnly())
+            return error("nonstandard txin (opcodes other than PUSH): %s", txin.scriptSig.ToString().c_str());
+    }
+    BOOST_FOREACH(const CTxOut& txout, vout)
+        if (!::IsStandard(txout.scriptPubKey))
+            return error("nonstandard txout: %s", txout.scriptPubKey.ToString().c_str());
+    return true;
+}
+
+//
+// Check transaction inputs, and make sure any
+// OP_EVAL transactions are evaluating IsStandard scripts
+//
+// Why bother? To avoid denial-of-service attacks; an attacker
+// can submit a standard DUP HASH... OP_EVAL transaction,
+// which will get accepted into blocks. The script being
+// EVAL'ed can be anything; an attacker could use a very
+// expensive-to-check-upon-redemption script like:
+//   DUP CHECKSIG DROP ... repeated 100 times... OP_1
+//
+bool CTransaction::AreInputsStandard(std::map<uint256, std::pair<CTxIndex, CTransaction> > mapInputs) const
+{
+    if (fTestNet)
+        return true; // Allow non-standard on testnet
+
+    for (int i = 0; i < vin.size(); i++)
+    {
+        COutPoint prevout = vin[i].prevout;
+        assert(mapInputs.count(prevout.hash) > 0);
+        CTransaction& txPrev = mapInputs[prevout.hash].second;
+        assert(prevout.n < txPrev.vout.size());
+
+        vector<vector<unsigned char> > vSolutions;
+        txnouttype whichType;
+        // get the scriptPubKey corresponding to this input:
+        CScript& prevScript = txPrev.vout[prevout.n].scriptPubKey;
+        if (!Solver(prevScript, whichType, vSolutions))
+            return error("nonstandard txin (spending nonstandard txout %s)", prevScript.ToString().c_str());
+        if (whichType == TX_SCRIPTHASH)
+        {
+            vector<vector<unsigned char> > stack;
+            int nUnused;
+            if (!EvalScript(stack, vin[i].scriptSig, *this, i, 0, true, nUnused))
+                return false;
+            CScript subscript(stack.back().begin(), stack.back().end());
+            if (!::IsStandard(subscript))
+                return error("nonstandard txin (nonstandard OP_EVAL subscript %s)", subscript.ToString().c_str());
+        }
+    }
+
+    return true;
 }
 
 
@@ -350,17 +428,8 @@ bool CTransaction::AcceptToMemoryPool(CTxDB& txdb, bool fCheckInputs, bool* pfMi
         return DoS(100, error("AcceptToMemoryPool() : coinbase as individual tx"));
 
     // To help v0.1.5 clients who would see it as a negative number
-    if ((int64)nLockTime > INT_MAX)
+    if ((int64)nLockTime > std::numeric_limits<int>::max())
         return error("AcceptToMemoryPool() : not accepting nLockTime beyond 2038 yet");
-
-    // Safety limits
-    unsigned int nSize = ::GetSerializeSize(*this, SER_NETWORK);
-    // Checking ECDSA signatures is a CPU bottleneck, so to avoid denial-of-service
-    // attacks disallow transactions with more than one SigOp per 34 bytes.
-    // 34 bytes because a TxOut is:
-    //   20-byte address + 8 byte bitcoin amount + 5 bytes of ops + 1 byte script length
-    if (GetSigOpCount() > nSize / 34 || nSize < 100)
-        return error("AcceptToMemoryPool() : transaction with out-of-bounds SigOpCount");
 
     // Rather not work on nonstandard transactions (unless -testnet)
     if (!fTestNet && !IsStandard())
@@ -405,18 +474,37 @@ bool CTransaction::AcceptToMemoryPool(CTxDB& txdb, bool fCheckInputs, bool* pfMi
 
     if (fCheckInputs)
     {
-        // Check against previous transactions
+        map<uint256, pair<CTxIndex, CTransaction> > mapInputs;
         map<uint256, CTxIndex> mapUnused;
+        if (!FetchInputs(txdb, mapUnused, false, false, mapInputs))
+        {
+            if (pfMissingInputs)
+                *pfMissingInputs = true;
+            return error("AcceptToMemoryPool() : FetchInputs failed %s", hash.ToString().substr(0,10).c_str());
+        }
+
+        // Check for non-standard OP_EVALs in inputs
+        if (!AreInputsStandard(mapInputs))
+            return error("AcceptToMemoryPool() : nonstandard transaction input");
+
+        // Check against previous transactions
         int64 nFees = 0;
-        if (!ConnectInputs(txdb, mapUnused, CDiskTxPos(1,1,1), pindexBest, nFees, false, false))
+        int nSigOps = 0;
+        if (!ConnectInputs(mapInputs, mapUnused, CDiskTxPos(1,1,1), pindexBest, nFees, false, false, nSigOps))
         {
             if (pfMissingInputs)
                 *pfMissingInputs = true;
             return error("AcceptToMemoryPool() : ConnectInputs failed %s", hash.ToString().substr(0,10).c_str());
         }
+        // Checking ECDSA signatures is a CPU bottleneck, so to avoid denial-of-service
+        // attacks disallow transactions with more than one SigOp per 65 bytes.
+        // 65 bytes because that is the minimum size of an ECDSA signature
+        unsigned int nSize = ::GetSerializeSize(*this, SER_NETWORK);
+        if (nSigOps > nSize / 65 || nSize < 100)
+            return error("AcceptToMemoryPool() : transaction with out-of-bounds SigOpCount");
 
         // Don't accept it if it can't get into a block
-        if (nFees < GetMinFee(1000, true, true))
+        if (nFees < GetMinFee(1000, true, GMF_RELAY))
             return error("AcceptToMemoryPool() : not enough fees");
 
         // Continuously rate-limit free transactions
@@ -505,7 +593,7 @@ bool CTransaction::RemoveFromMemoryPool()
 
 
 
-int CMerkleTx::GetDepthInMainChain(int& nHeightRet) const
+int CMerkleTx::GetDepthInMainChain(CBlockIndex* &pindexRet) const
 {
     if (hashBlock == 0 || nIndex == -1)
         return 0;
@@ -526,7 +614,7 @@ int CMerkleTx::GetDepthInMainChain(int& nHeightRet) const
         fMerkleVerified = true;
     }
 
-    nHeightRet = pindex->nHeight;
+    pindexRet = pindex;
     return pindexBest->nHeight - pindex->nHeight + 1;
 }
 
@@ -648,11 +736,32 @@ int64 static GetBlockValue(int nHeight, int64 nFees)
     return nSubsidy + nFees;
 }
 
+static const int64 nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
+static const int64 nTargetSpacing = 10 * 60;
+static const int64 nInterval = nTargetTimespan / nTargetSpacing;
+
+//
+// minimum amount of work that could possibly be required nTime after
+// minimum work required was nBase
+//
+unsigned int ComputeMinWork(unsigned int nBase, int64 nTime)
+{
+    CBigNum bnResult;
+    bnResult.SetCompact(nBase);
+    while (nTime > 0 && bnResult < bnProofOfWorkLimit)
+    {
+        // Maximum 400% adjustment...
+        bnResult *= 4;
+        // ... in best-case exactly 4-times-normal target time
+        nTime -= nTargetTimespan*4;
+    }
+    if (bnResult > bnProofOfWorkLimit)
+        bnResult = bnProofOfWorkLimit;
+    return bnResult.GetCompact();
+}
+
 unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast)
 {
-    const int64 nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-    const int64 nTargetSpacing = 10 * 60;
-    const int64 nInterval = nTargetTimespan / nTargetSpacing;
 
     // Genesis block
     if (pindexLast == NULL)
@@ -710,28 +819,15 @@ bool CheckProofOfWork(uint256 hash, unsigned int nBits)
     return true;
 }
 
-// Return conservative estimate of total number of blocks, 0 if unknown
-int GetTotalBlocksEstimate()
-{
-    if(fTestNet)
-    {
-        return 0;
-    }
-    else
-    {
-        return nTotalBlocksEstimate;
-    }
-}
-
 // Return maximum amount of blocks that other nodes claim to have
 int GetNumBlocksOfPeers()
 {
-    return std::max(cPeerBlockCounts.median(), GetTotalBlocksEstimate());
+    return std::max(cPeerBlockCounts.median(), Checkpoints::GetTotalBlocksEstimate());
 }
 
 bool IsInitialBlockDownload()
 {
-    if (pindexBest == NULL || nBestHeight < (GetTotalBlocksEstimate()-nInitialBlockThreshold))
+    if (pindexBest == NULL || nBestHeight < Checkpoints::GetTotalBlocksEstimate())
         return true;
     static int64 nLastUpdate;
     static CBlockIndex* pindexLastBest;
@@ -802,8 +898,72 @@ bool CTransaction::DisconnectInputs(CTxDB& txdb)
 }
 
 
-bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx,
-                                 CBlockIndex* pindexBlock, int64& nFees, bool fBlock, bool fMiner, int64 nMinFee)
+bool CTransaction::FetchInputs(CTxDB& txdb, const map<uint256, CTxIndex>& mapTestPool,
+                               bool fBlock, bool fMiner, map<uint256, pair<CTxIndex, CTransaction> >& inputsRet)
+{
+    if (IsCoinBase())
+        return true; // Coinbase transactions have no inputs to fetch.
+
+    for (int i = 0; i < vin.size(); i++)
+    {
+        COutPoint prevout = vin[i].prevout;
+        if (inputsRet.count(prevout.hash))
+            continue; // Got it already
+
+        // Read txindex
+        CTxIndex& txindex = inputsRet[prevout.hash].first;
+        bool fFound = true;
+        if ((fBlock || fMiner) && mapTestPool.count(prevout.hash))
+        {
+            // Get txindex from current proposed changes
+            txindex = mapTestPool.find(prevout.hash)->second;
+        }
+        else
+        {
+            // Read txindex from txdb
+            fFound = txdb.ReadTxIndex(prevout.hash, txindex);
+        }
+        if (!fFound && (fBlock || fMiner))
+            return fMiner ? false : error("FetchInputs() : %s prev tx %s index entry not found", GetHash().ToString().substr(0,10).c_str(),  prevout.hash.ToString().substr(0,10).c_str());
+
+        // Read txPrev
+        CTransaction& txPrev = inputsRet[prevout.hash].second;
+        if (!fFound || txindex.pos == CDiskTxPos(1,1,1))
+        {
+            // Get prev tx from single transactions in memory
+            CRITICAL_BLOCK(cs_mapTransactions)
+            {
+                if (!mapTransactions.count(prevout.hash))
+                    return error("FetchInputs() : %s mapTransactions prev not found %s", GetHash().ToString().substr(0,10).c_str(),  prevout.hash.ToString().substr(0,10).c_str());
+                txPrev = mapTransactions[prevout.hash];
+            }
+            if (!fFound)
+                txindex.vSpent.resize(txPrev.vout.size());
+        }
+        else
+        {
+            // Get prev tx from disk
+            if (!txPrev.ReadFromDisk(txindex.pos))
+                return error("FetchInputs() : %s ReadFromDisk prev tx %s failed", GetHash().ToString().substr(0,10).c_str(),  prevout.hash.ToString().substr(0,10).c_str());
+        }
+    }
+
+    // Make sure all prevout.n's are valid:
+    for (int i = 0; i < vin.size(); i++)
+    {
+        const COutPoint prevout = vin[i].prevout;
+        const CTxIndex& txindex = inputsRet[prevout.hash].first;
+        const CTransaction& txPrev = inputsRet[prevout.hash].second;
+        if (prevout.n >= txPrev.vout.size() || prevout.n >= txindex.vSpent.size())
+            return DoS(100, error("FetchInputs() : %s prevout.n out of range %d %d %d prev tx %s\n%s", GetHash().ToString().substr(0,10).c_str(), prevout.n, txPrev.vout.size(), txindex.vSpent.size(), prevout.hash.ToString().substr(0,10).c_str(), txPrev.ToString().c_str()));
+    }
+
+    return true;
+}
+
+bool CTransaction::ConnectInputs(map<uint256, pair<CTxIndex, CTransaction> > inputs,
+                                 map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx,
+                                 CBlockIndex* pindexBlock, int64& nFees, bool fBlock, bool fMiner, int& nSigOpsRet, int64 nMinFee)
 {
     // Take over previous transactions' spent pointers
     // fBlock is true when this is called from AcceptBlock when a new best-block is added to the blockchain
@@ -815,43 +975,9 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPoo
         for (int i = 0; i < vin.size(); i++)
         {
             COutPoint prevout = vin[i].prevout;
-
-            // Read txindex
-            CTxIndex txindex;
-            bool fFound = true;
-            if ((fBlock || fMiner) && mapTestPool.count(prevout.hash))
-            {
-                // Get txindex from current proposed changes
-                txindex = mapTestPool[prevout.hash];
-            }
-            else
-            {
-                // Read txindex from txdb
-                fFound = txdb.ReadTxIndex(prevout.hash, txindex);
-            }
-            if (!fFound && (fBlock || fMiner))
-                return fMiner ? false : error("ConnectInputs() : %s prev tx %s index entry not found", GetHash().ToString().substr(0,10).c_str(),  prevout.hash.ToString().substr(0,10).c_str());
-
-            // Read txPrev
-            CTransaction txPrev;
-            if (!fFound || txindex.pos == CDiskTxPos(1,1,1))
-            {
-                // Get prev tx from single transactions in memory
-                CRITICAL_BLOCK(cs_mapTransactions)
-                {
-                    if (!mapTransactions.count(prevout.hash))
-                        return error("ConnectInputs() : %s mapTransactions prev not found %s", GetHash().ToString().substr(0,10).c_str(),  prevout.hash.ToString().substr(0,10).c_str());
-                    txPrev = mapTransactions[prevout.hash];
-                }
-                if (!fFound)
-                    txindex.vSpent.resize(txPrev.vout.size());
-            }
-            else
-            {
-                // Get prev tx from disk
-                if (!txPrev.ReadFromDisk(txindex.pos))
-                    return error("ConnectInputs() : %s ReadFromDisk prev tx %s failed", GetHash().ToString().substr(0,10).c_str(),  prevout.hash.ToString().substr(0,10).c_str());
-            }
+            assert(inputs.count(prevout.hash) > 0);
+            CTxIndex& txindex = inputs[prevout.hash].first;
+            CTransaction& txPrev = inputs[prevout.hash].second;
 
             if (prevout.n >= txPrev.vout.size() || prevout.n >= txindex.vSpent.size())
                 return DoS(100, error("ConnectInputs() : %s prevout.n out of range %d %d %d prev tx %s\n%s", GetHash().ToString().substr(0,10).c_str(), prevout.n, txPrev.vout.size(), txindex.vSpent.size(), prevout.hash.ToString().substr(0,10).c_str(), txPrev.ToString().c_str()));
@@ -862,13 +988,31 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPoo
                     if (pindex->nBlockPos == txindex.pos.nBlockPos && pindex->nFile == txindex.pos.nFile)
                         return error("ConnectInputs() : tried to spend coinbase at depth %d", pindexBlock->nHeight - pindex->nHeight);
 
-            // Skip ECDSA signature verification when connecting blocks (fBlock=true) during initial download
-            // (before the last blockchain checkpoint). This is safe because block merkle hashes are
+            // Skip ECDSA signature verification when connecting blocks (fBlock=true)
+            // before the last blockchain checkpoint. This is safe because block merkle hashes are
             // still computed and checked, and any change will be caught at the next checkpoint.
-            if (!(fBlock && IsInitialBlockDownload()))
+            if (!(fBlock && (nBestHeight < Checkpoints::GetTotalBlocksEstimate())))
+            {
+                bool fStrictOpEval = true;
+                // This code should be removed when OP_EVAL has
+                // a majority of hashing power on the network.
+                if (fBlock)
+                {
+                    // To avoid being on the short end of a block-chain split,
+                    // interpret OP_EVAL as a NO_OP until blocks with timestamps
+                    // after opevaltime:
+                    int64 nEvalSwitchTime = GetArg("opevaltime", 1328054400); // Feb 1, 2012
+                    fStrictOpEval = (pindexBlock->nTime >= nEvalSwitchTime);
+                }
+                // if !fBlock, then always be strict-- don't accept
+                // invalid-under-new-rules OP_EVAL transactions into
+                // our memory pool (don't relay them, don't include them
+                // in blocks we mine).
+
                 // Verify signature
-                if (!VerifySignature(txPrev, *this, i))
+                if (!VerifySignature(txPrev, *this, i, nSigOpsRet, fStrictOpEval))
                     return DoS(100,error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,10).c_str()));
+            }
 
             // Check for conflicts (double-spend)
             // This doesn't trigger the DoS code on purpose; if it did, it would make it easier
@@ -941,7 +1085,8 @@ bool CTransaction::ClientConnectInputs()
                 return false;
 
             // Verify signature
-            if (!VerifySignature(txPrev, *this, i))
+            int nUnused = 0;
+            if (!VerifySignature(txPrev, *this, i, nUnused, false))
                 return error("ConnectInputs() : VerifySignature failed");
 
             ///// this is redundant with the mapNextTx stuff, not sure which I want to get rid of
@@ -999,14 +1144,21 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex)
 
     map<uint256, CTxIndex> mapQueuedChanges;
     int64 nFees = 0;
+    int nSigOps = 0;
     BOOST_FOREACH(CTransaction& tx, vtx)
     {
         CDiskTxPos posThisTx(pindex->nFile, pindex->nBlockPos, nTxPos);
         nTxPos += ::GetSerializeSize(tx, SER_DISK);
 
-        if (!tx.ConnectInputs(txdb, mapQueuedChanges, posThisTx, pindex, nFees, true, false))
+        map<uint256, pair<CTxIndex, CTransaction> > mapInputs;
+        if (!tx.FetchInputs(txdb, mapQueuedChanges, true, false, mapInputs))
             return false;
+        if (!tx.ConnectInputs(mapInputs, mapQueuedChanges, posThisTx, pindex, nFees, true, false, nSigOps))
+            return false;
+        if (nSigOps > MAX_BLOCK_SIGOPS)
+            return DoS(100, error("ConnectBlock() : too many sigops"));
     }
+
     // Write queued txindex changes
     for (map<uint256, CTxIndex>::iterator mi = mapQueuedChanges.begin(); mi != mapQueuedChanges.end(); ++mi)
     {
@@ -1274,8 +1426,21 @@ bool CBlock::CheckBlock() const
         if (!tx.CheckTransaction())
             return DoS(tx.nDoS, error("CheckBlock() : CheckTransaction failed"));
 
-    // Check that it's not full of nonstandard transactions
-    if (GetSigOpCount() > MAX_BLOCK_SIGOPS)
+    // This code should be removed when a compatibility-breaking block chain split has passed.
+    // Compatibility check for old clients that counted sigops differently:
+    int nSigOps = 0;
+    BOOST_FOREACH(const CTransaction& tx, vtx)
+    {
+        BOOST_FOREACH(const CTxIn& txin, tx.vin)
+        {
+            nSigOps += txin.scriptSig.GetSigOpCount();
+        }
+        BOOST_FOREACH(const CTxOut& txout, tx.vout)
+        {
+            nSigOps += txout.scriptPubKey.GetSigOpCount();
+        }
+    }
+    if (nSigOps > MAX_BLOCK_SIGOPS)
         return DoS(100, error("CheckBlock() : out-of-bounds SigOpCount"));
 
     // Check merkleroot
@@ -1313,17 +1478,8 @@ bool CBlock::AcceptBlock()
             return DoS(10, error("AcceptBlock() : contains a non-final transaction"));
 
     // Check that the block chain matches the known block chain up to a checkpoint
-    if (!fTestNet)
-        if ((nHeight ==  11111 && hash != uint256("0x0000000069e244f73d78e8fd29ba2fd2ed618bd6fa2ee92559f542fdb26e7c1d")) ||
-            (nHeight ==  33333 && hash != uint256("0x000000002dd5588a74784eaa7ab0507a18ad16a236e7b1ce69f00d7ddfb5d0a6")) ||
-            (nHeight ==  68555 && hash != uint256("0x00000000001e1b4903550a0b96e9a9405c8a95f387162e4944e8d9fbe501cd6a")) ||
-            (nHeight ==  70567 && hash != uint256("0x00000000006a49b14bcf27462068f1264c961f11fa2e0eddd2be0791e1d4124a")) ||
-            (nHeight ==  74000 && hash != uint256("0x0000000000573993a3c9e41ce34471c079dcf5f52a0e824a81e7f953b8661a20")) ||
-            (nHeight == 105000 && hash != uint256("0x00000000000291ce28027faea320c8d2b054b2e0fe44a773f3eefb151d6bdc97")) ||
-            (nHeight == 118000 && hash != uint256("0x000000000000774a7f8a7a12dc906ddb9e17e75d684f15e00f8767f9e8f36553")) ||
-            (nHeight == 134444 && hash != uint256("0x00000000000005b12ffd4cd315cd34ffd4a594f430ac814c91184a0d42d2b0fe")) ||
-            (nHeight == 140700 && hash != uint256("0x000000000000033b512028abb90e1626d8b346fd0ed598ac0a3c371138dce2bd")))
-            return DoS(100, error("AcceptBlock() : rejected by checkpoint lockin at %d", nHeight));
+    if (!Checkpoints::CheckBlock(nHeight, hash))
+        return DoS(100, error("AcceptBlock() : rejected by checkpoint lockin at %d", nHeight));
 
     // Write block to history file
     if (!CheckDiskSpace(::GetSerializeSize(*this, SER_DISK)))
@@ -1357,6 +1513,28 @@ bool ProcessBlock(CNode* pfrom, CBlock* pblock)
     // Preliminary checks
     if (!pblock->CheckBlock())
         return error("ProcessBlock() : CheckBlock FAILED");
+
+    CBlockIndex* pcheckpoint = Checkpoints::GetLastCheckpoint(mapBlockIndex);
+    if (pcheckpoint && pblock->hashPrevBlock != hashBestChain)
+    {
+        // Extra checks to prevent "fill up memory by spamming with bogus blocks"
+        int64 deltaTime = pblock->GetBlockTime() - pcheckpoint->nTime;
+        if (deltaTime < 0)
+        {
+            pfrom->Misbehaving(100);
+            return error("ProcessBlock() : block with timestamp before last checkpoint");
+        }
+        CBigNum bnNewBlock;
+        bnNewBlock.SetCompact(pblock->nBits);
+        CBigNum bnRequired;
+        bnRequired.SetCompact(ComputeMinWork(pcheckpoint->nBits, deltaTime));
+        if (bnNewBlock > bnRequired)
+        {
+            pfrom->Misbehaving(100);
+            return error("ProcessBlock() : block with too little proof-of-work");
+        }
+    }
+
 
     // If don't already have its previous block, shunt it off to holding area until we get it
     if (!mapBlockIndex.count(pblock->hashPrevBlock))
@@ -1822,9 +2000,9 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         // Change version
         if (pfrom->nVersion >= 209)
             pfrom->PushMessage("verack");
-        pfrom->vSend.SetVersion(min(pfrom->nVersion, VERSION));
+        pfrom->vSend.SetVersion(min(pfrom->nVersion, PROTOCOL_VERSION));
         if (pfrom->nVersion < 209)
-            pfrom->vRecv.SetVersion(min(pfrom->nVersion, VERSION));
+            pfrom->vRecv.SetVersion(min(pfrom->nVersion, PROTOCOL_VERSION));
 
         if (!pfrom->fInbound)
         {
@@ -1845,7 +2023,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         }
 
         // Ask the first connected node for block updates
-        static int nAskedForBlocks;
+        static int nAskedForBlocks = 0;
         if (!pfrom->fClient &&
             (pfrom->nVersion < 32000 || pfrom->nVersion >= 32400) &&
              (nAskedForBlocks < 1 || vNodes.size() <= 1))
@@ -1877,7 +2055,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
 
     else if (strCommand == "verack")
     {
-        pfrom->vRecv.SetVersion(min(pfrom->nVersion, VERSION));
+        pfrom->vRecv.SetVersion(min(pfrom->nVersion, PROTOCOL_VERSION));
     }
 
 
@@ -2797,18 +2975,21 @@ CBlock* CreateNewBlock(CReserveKey& reservekey)
             unsigned int nTxSize = ::GetSerializeSize(tx, SER_NETWORK);
             if (nBlockSize + nTxSize >= MAX_BLOCK_SIZE_GEN)
                 continue;
-            int nTxSigOps = tx.GetSigOpCount();
-            if (nBlockSigOps + nTxSigOps >= MAX_BLOCK_SIGOPS)
-                continue;
 
             // Transaction fee required depends on block size
             bool fAllowFree = (nBlockSize + nTxSize < 4000 || CTransaction::AllowFree(dPriority));
-            int64 nMinFee = tx.GetMinFee(nBlockSize, fAllowFree, true);
+            int64 nMinFee = tx.GetMinFee(nBlockSize, fAllowFree, GMF_BLOCK);
 
             // Connecting shouldn't fail due to dependency on other memory pool transactions
             // because we're already processing them in order of dependency
             map<uint256, CTxIndex> mapTestPoolTmp(mapTestPool);
-            if (!tx.ConnectInputs(txdb, mapTestPoolTmp, CDiskTxPos(1,1,1), pindexPrev, nFees, false, true, nMinFee))
+            map<uint256, pair<CTxIndex, CTransaction> > mapInputs;
+            if (!tx.FetchInputs(txdb, mapTestPoolTmp, false, true, mapInputs))
+                continue;
+            int nTxSigOps = 0;
+            if (!tx.ConnectInputs(mapInputs, mapTestPoolTmp, CDiskTxPos(1,1,1), pindexPrev, nFees, false, true, nTxSigOps, nMinFee))
+                continue;
+            if (nBlockSigOps + nTxSigOps >= MAX_BLOCK_SIGOPS)
                 continue;
             swap(mapTestPool, mapTestPoolTmp);
 
@@ -2857,6 +3038,13 @@ void IncrementExtraNonce(CBlock* pblock, CBlockIndex* pindexPrev, unsigned int& 
     }
     ++nExtraNonce;
     pblock->vtx[0].vin[0].scriptSig = CScript() << pblock->nTime << CBigNum(nExtraNonce);
+
+    // Put "OP_EVAL" in the coinbase so everybody can tell when
+    // a majority of miners support it
+    const char* pOpEvalName = GetOpName(OP_EVAL);
+    pblock->vtx[0].vin[0].scriptSig += CScript() << std::vector<unsigned char>(pOpEvalName, pOpEvalName+strlen(pOpEvalName));
+    assert(pblock->vtx[0].vin[0].scriptSig.size() <= 100);
+
     pblock->hashMerkleRoot = pblock->BuildMerkleTree();
 }
 

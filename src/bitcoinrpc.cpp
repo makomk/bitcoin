@@ -9,9 +9,11 @@
 #include "init.h"
 #undef printf
 #include <boost/asio.hpp>
+#include <boost/filesystem.hpp>
 #include <boost/iostreams/concepts.hpp>
 #include <boost/iostreams/stream.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
 #ifdef USE_SSL
 #include <boost/asio/ssl.hpp> 
 #include <boost/filesystem.hpp>
@@ -37,9 +39,13 @@ void ThreadRPCServer2(void* parg);
 typedef Value(*rpcfn_type)(const Array& params, bool fHelp);
 extern map<string, rpcfn_type> mapCallTable;
 
+static std::string strRPCUserColonPass;
+
 static int64 nWalletUnlockTime;
 static CCriticalSection cs_nWalletUnlockTime;
 
+extern Value dumpprivkey(const Array& params, bool fHelp);
+extern Value importprivkey(const Array& params, bool fHelp);
 
 Object JSONRPCError(int code, const string& message)
 {
@@ -86,7 +92,13 @@ Value ValueFromAmount(int64 amount)
 
 void WalletTxToJSON(const CWalletTx& wtx, Object& entry)
 {
-    entry.push_back(Pair("confirmations", wtx.GetDepthInMainChain()));
+    int confirms = wtx.GetDepthInMainChain();
+    entry.push_back(Pair("confirmations", confirms));
+    if (confirms)
+    {
+        entry.push_back(Pair("blockhash", wtx.hashBlock.GetHex()));
+        entry.push_back(Pair("blockindex", wtx.nIndex));
+    }
     entry.push_back(Pair("txid", wtx.GetHash().GetHex()));
     entry.push_back(Pair("time", (boost::int64_t)wtx.GetTxTime()));
     BOOST_FOREACH(const PAIRTYPE(string,string)& item, wtx.mapValue)
@@ -127,6 +139,7 @@ Value help(const Array& params, bool fHelp)
         // We already filter duplicates, but these deprecated screw up the sort order
         if (strMethod == "getamountreceived" ||
             strMethod == "getallreceived" ||
+            strMethod == "getblocknumber" || // deprecated
             (strMethod.find("label") != string::npos))
             continue;
         if (strCommand != "" && strMethod != strCommand)
@@ -161,10 +174,13 @@ Value stop(const Array& params, bool fHelp)
         throw runtime_error(
             "stop\n"
             "Stop bitcoin server.");
-
+#ifndef QT_GUI
     // Shutdown will take long enough that the response should get back
     CreateThread(Shutdown, NULL);
     return "bitcoin server stopping";
+#else
+    throw runtime_error("NYI: cannot shut down GUI with RPC command");
+#endif
 }
 
 
@@ -179,12 +195,13 @@ Value getblockcount(const Array& params, bool fHelp)
 }
 
 
+// deprecated
 Value getblocknumber(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() != 0)
         throw runtime_error(
             "getblocknumber\n"
-            "Returns the block number of the latest block in the longest block chain.");
+            "Deprecated.  Use getblockcount.");
 
     return nBestHeight;
 }
@@ -298,7 +315,8 @@ Value getinfo(const Array& params, bool fHelp)
             "Returns an object containing various state info.");
 
     Object obj;
-    obj.push_back(Pair("version",       (int)VERSION));
+    obj.push_back(Pair("version",       (int)CLIENT_VERSION));
+    obj.push_back(Pair("protocolversion",(int)PROTOCOL_VERSION));
     obj.push_back(Pair("balance",       ValueFromAmount(pwalletMain->GetBalance())));
     obj.push_back(Pair("blocks",        (int)nBestHeight));
     obj.push_back(Pair("connections",   (int)vNodes.size()));
@@ -589,7 +607,7 @@ Value verifymessage(const Array& params, bool fHelp)
     if (!key.SetCompactSignature(Hash(ss.begin(), ss.end()), vchSig))
         return false;
 
-    return (key.GetAddress() == addr);
+    return (CBitcoinAddress(key.GetPubKey()) == addr);
 }
 
 
@@ -656,7 +674,7 @@ Value getreceivedbyaccount(const Array& params, bool fHelp)
     if (params.size() > 1)
         nMinDepth = params[1].get_int();
 
-    // Get the set of pub keys that have the label
+    // Get the set of pub keys assigned to account
     string strAccount = AccountFromValue(params[0]);
     set<CBitcoinAddress> setAddress;
     GetAccountAddresses(strAccount, setAddress);
@@ -672,7 +690,7 @@ Value getreceivedbyaccount(const Array& params, bool fHelp)
         BOOST_FOREACH(const CTxOut& txout, wtx.vout)
         {
             CBitcoinAddress address;
-            if (ExtractAddress(txout.scriptPubKey, pwalletMain, address) && setAddress.count(address))
+            if (ExtractAddress(txout.scriptPubKey, address) && pwalletMain->HaveKey(address) && setAddress.count(address))
                 if (wtx.GetDepthInMainChain() >= nMinDepth)
                     nAmount += txout.nValue;
         }
@@ -925,6 +943,68 @@ Value sendmany(const Array& params, bool fHelp)
     return wtx.GetHash().GetHex();
 }
 
+Value addmultisigaddress(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 2 || params.size() > 3)
+    {
+        string msg = "addmultisigaddress <nrequired> <'[\"key\",\"key\"]'> [account]\n"
+            "Add a nrequired-to-sign multisignature address to the wallet\"\n"
+            "each key is a bitcoin address, hex or base58 public key\n"
+            "If [account] is specified, assign address to [account].";
+        throw runtime_error(msg);
+    }
+    if (!fTestNet)
+        throw runtime_error("addmultisigaddress available only when running -testnet\n");
+
+    int nRequired = params[0].get_int();
+    const Array& keys = params[1].get_array();
+    string strAccount;
+    if (params.size() > 2)
+        strAccount = AccountFromValue(params[2]);
+
+    // Gather public keys
+    if (keys.size() < nRequired)
+        throw runtime_error(
+            strprintf("addmultisigaddress: wrong number of keys (got %d, need at least %d)", keys.size(), nRequired));
+    std::vector<CKey> pubkeys;
+    pubkeys.resize(keys.size());
+    for (int i = 0; i < keys.size(); i++)
+    {
+        const std::string& ks = keys[i].get_str();
+        if (ks.size() == 130) // hex public key
+            pubkeys[i].SetPubKey(ParseHex(ks));
+        else if (ks.size() > 34) // base58-encoded
+        {
+            std::vector<unsigned char> vchPubKey;
+            if (DecodeBase58(ks, vchPubKey))
+                pubkeys[i].SetPubKey(vchPubKey);
+            else
+                throw runtime_error("Error base58 decoding key: "+ks);
+        }
+        else // bitcoin address for key in this wallet
+        {
+            CBitcoinAddress address(ks);
+            if (!pwalletMain->GetKey(address, pubkeys[i]))
+                throw runtime_error(
+                    strprintf("addmultisigaddress: unknown address: %s",ks.c_str()));
+        }
+    }
+
+    // Construct using OP_EVAL
+    CScript inner;
+    inner.SetMultisig(nRequired, pubkeys);
+
+    uint160 scriptHash = Hash160(inner);
+    CScript scriptPubKey;
+    scriptPubKey.SetEval(inner);
+    pwalletMain->AddCScript(scriptHash, inner);
+    CBitcoinAddress address;
+    address.SetScriptHash160(scriptHash);
+
+    pwalletMain->SetAddressBookName(address, strAccount);
+    return address.ToString();
+}
+
 
 struct tallyitem
 {
@@ -933,7 +1013,7 @@ struct tallyitem
     tallyitem()
     {
         nAmount = 0;
-        nConf = INT_MAX;
+        nConf = std::numeric_limits<int>::max();
     }
 };
 
@@ -954,6 +1034,7 @@ Value ListReceived(const Array& params, bool fByAccounts)
     for (map<uint256, CWalletTx>::iterator it = pwalletMain->mapWallet.begin(); it != pwalletMain->mapWallet.end(); ++it)
     {
         const CWalletTx& wtx = (*it).second;
+
         if (wtx.IsCoinBase() || !wtx.IsFinal())
             continue;
 
@@ -964,7 +1045,7 @@ Value ListReceived(const Array& params, bool fByAccounts)
         BOOST_FOREACH(const CTxOut& txout, wtx.vout)
         {
             CBitcoinAddress address;
-            if (!ExtractAddress(txout.scriptPubKey, pwalletMain, address) || !address.IsValid())
+            if (!ExtractAddress(txout.scriptPubKey, address) || !pwalletMain->HaveKey(address) || !address.IsValid())
                 continue;
 
             tallyitem& item = mapTally[address];
@@ -985,7 +1066,7 @@ Value ListReceived(const Array& params, bool fByAccounts)
             continue;
 
         int64 nAmount = 0;
-        int nConf = INT_MAX;
+        int nConf = std::numeric_limits<int>::max();
         if (it != mapTally.end())
         {
             nAmount = (*it).second.nAmount;
@@ -1004,7 +1085,7 @@ Value ListReceived(const Array& params, bool fByAccounts)
             obj.push_back(Pair("address",       address.ToString()));
             obj.push_back(Pair("account",       strAccount));
             obj.push_back(Pair("amount",        ValueFromAmount(nAmount)));
-            obj.push_back(Pair("confirmations", (nConf == INT_MAX ? 0 : nConf)));
+            obj.push_back(Pair("confirmations", (nConf == std::numeric_limits<int>::max() ? 0 : nConf)));
             ret.push_back(obj);
         }
     }
@@ -1018,7 +1099,7 @@ Value ListReceived(const Array& params, bool fByAccounts)
             Object obj;
             obj.push_back(Pair("account",       (*it).first));
             obj.push_back(Pair("amount",        ValueFromAmount(nAmount)));
-            obj.push_back(Pair("confirmations", (nConf == INT_MAX ? 0 : nConf)));
+            obj.push_back(Pair("confirmations", (nConf == std::numeric_limits<int>::max() ? 0 : nConf)));
             ret.push_back(obj);
         }
     }
@@ -1063,6 +1144,7 @@ void ListTransactions(const CWalletTx& wtx, const string& strAccount, int nMinDe
     string strSentAccount;
     list<pair<CBitcoinAddress, int64> > listReceived;
     list<pair<CBitcoinAddress, int64> > listSent;
+
     wtx.GetAmounts(nGeneratedImmature, nGeneratedMature, listReceived, listSent, nFee, strSentAccount);
 
     bool fAllAccounts = (strAccount == string("*"));
@@ -1449,21 +1531,16 @@ Value walletpassphrase(const Array& params, bool fHelp)
         throw JSONRPCError(-17, "Error: Wallet is already unlocked.");
 
     // Note that the walletpassphrase is stored in params[0] which is not mlock()ed
-    string strWalletPass;
+    SecureString strWalletPass;
     strWalletPass.reserve(100);
-    mlock(&strWalletPass[0], strWalletPass.capacity());
-    strWalletPass = params[0].get_str();
+    // TODO: get rid of this .c_str() by implementing SecureString::operator=(std::string)
+    // Alternately, find a way to make params[0] mlock()'d to begin with.
+    strWalletPass = params[0].get_str().c_str();
 
     if (strWalletPass.length() > 0)
     {
         if (!pwalletMain->Unlock(strWalletPass))
-        {
-            fill(strWalletPass.begin(), strWalletPass.end(), '\0');
-            munlock(&strWalletPass[0], strWalletPass.capacity());
             throw JSONRPCError(-14, "Error: The wallet passphrase entered was incorrect.");
-        }
-        fill(strWalletPass.begin(), strWalletPass.end(), '\0');
-        munlock(&strWalletPass[0], strWalletPass.capacity());
     }
     else
         throw runtime_error(
@@ -1489,15 +1566,15 @@ Value walletpassphrasechange(const Array& params, bool fHelp)
     if (!pwalletMain->IsCrypted())
         throw JSONRPCError(-15, "Error: running with an unencrypted wallet, but walletpassphrasechange was called.");
 
-    string strOldWalletPass;
+    // TODO: get rid of these .c_str() calls by implementing SecureString::operator=(std::string)
+    // Alternately, find a way to make params[0] mlock()'d to begin with.
+    SecureString strOldWalletPass;
     strOldWalletPass.reserve(100);
-    mlock(&strOldWalletPass[0], strOldWalletPass.capacity());
-    strOldWalletPass = params[0].get_str();
+    strOldWalletPass = params[0].get_str().c_str();
 
-    string strNewWalletPass;
+    SecureString strNewWalletPass;
     strNewWalletPass.reserve(100);
-    mlock(&strNewWalletPass[0], strNewWalletPass.capacity());
-    strNewWalletPass = params[1].get_str();
+    strNewWalletPass = params[1].get_str().c_str();
 
     if (strOldWalletPass.length() < 1 || strNewWalletPass.length() < 1)
         throw runtime_error(
@@ -1505,17 +1582,7 @@ Value walletpassphrasechange(const Array& params, bool fHelp)
             "Changes the wallet passphrase from <oldpassphrase> to <newpassphrase>.");
 
     if (!pwalletMain->ChangeWalletPassphrase(strOldWalletPass, strNewWalletPass))
-    {
-        fill(strOldWalletPass.begin(), strOldWalletPass.end(), '\0');
-        fill(strNewWalletPass.begin(), strNewWalletPass.end(), '\0');
-        munlock(&strOldWalletPass[0], strOldWalletPass.capacity());
-        munlock(&strNewWalletPass[0], strNewWalletPass.capacity());
         throw JSONRPCError(-14, "Error: The wallet passphrase entered was incorrect.");
-    }
-    fill(strNewWalletPass.begin(), strNewWalletPass.end(), '\0');
-    fill(strOldWalletPass.begin(), strOldWalletPass.end(), '\0');
-    munlock(&strOldWalletPass[0], strOldWalletPass.capacity());
-    munlock(&strNewWalletPass[0], strNewWalletPass.capacity());
 
     return Value::null;
 }
@@ -1555,10 +1622,16 @@ Value encryptwallet(const Array& params, bool fHelp)
     if (pwalletMain->IsCrypted())
         throw JSONRPCError(-15, "Error: running with an encrypted wallet, but encryptwallet was called.");
 
-    string strWalletPass;
+#ifdef QT_GUI
+    // shutting down via RPC while the GUI is running does not work (yet):
+    throw runtime_error("Not Yet Implemented: use GUI to encrypt wallet, not RPC command");
+#endif
+
+    // TODO: get rid of this .c_str() by implementing SecureString::operator=(std::string)
+    // Alternately, find a way to make params[0] mlock()'d to begin with.
+    SecureString strWalletPass;
     strWalletPass.reserve(100);
-    mlock(&strWalletPass[0], strWalletPass.capacity());
-    strWalletPass = params[0].get_str();
+    strWalletPass = params[0].get_str().c_str();
 
     if (strWalletPass.length() < 1)
         throw runtime_error(
@@ -1566,15 +1639,13 @@ Value encryptwallet(const Array& params, bool fHelp)
             "Encrypts the wallet with <passphrase>.");
 
     if (!pwalletMain->EncryptWallet(strWalletPass))
-    {
-        fill(strWalletPass.begin(), strWalletPass.end(), '\0');
-        munlock(&strWalletPass[0], strWalletPass.capacity());
         throw JSONRPCError(-16, "Error: Failed to encrypt the wallet.");
-    }
-    fill(strWalletPass.begin(), strWalletPass.end(), '\0');
-    munlock(&strWalletPass[0], strWalletPass.capacity());
 
-    return Value::null;
+    // BDB seems to have a bad habit of writing old data into
+    // slack space in .dat files; that is bad if the old data is
+    // unencrypted private keys.  So:
+    CreateThread(Shutdown, NULL);
+    return "wallet encrypted; bitcoin server stopping, restart to run with encrypted wallet";
 }
 
 
@@ -1596,13 +1667,40 @@ Value validateaddress(const Array& params, bool fHelp)
         // version of the address:
         string currentAddress = address.ToString();
         ret.push_back(Pair("address", currentAddress));
-        ret.push_back(Pair("ismine", (pwalletMain->HaveKey(address) > 0)));
+        if (pwalletMain->HaveKey(address))
+        {
+            ret.push_back(Pair("ismine", true));
+            std::vector<unsigned char> vchPubKey;
+            pwalletMain->GetPubKey(address, vchPubKey);
+            ret.push_back(Pair("pubkey", HexStr(vchPubKey)));
+            std::string strPubKey(vchPubKey.begin(), vchPubKey.end());
+            ret.push_back(Pair("pubkey58", EncodeBase58(vchPubKey)));
+        }
+        else if (pwalletMain->HaveCScript(address.GetHash160()))
+        {
+            ret.push_back(Pair("isscript", true));
+            CScript subscript;
+            pwalletMain->GetCScript(address.GetHash160(), subscript);
+            ret.push_back(Pair("ismine", ::IsMine(*pwalletMain, subscript)));
+            std::vector<CBitcoinAddress> addresses;
+            txnouttype whichType;
+            int nRequired;
+            ExtractAddresses(subscript, whichType, addresses, nRequired);
+            ret.push_back(Pair("script", GetTxnOutputType(whichType)));
+            Array a;
+            BOOST_FOREACH(const CBitcoinAddress& addr, addresses)
+                a.push_back(addr.ToString());
+            ret.push_back(Pair("addresses", a));
+            if (whichType == TX_MULTISIG)
+                ret.push_back(Pair("sigsrequired", nRequired));
+        }
+        else
+            ret.push_back(Pair("ismine", false));
         if (pwalletMain->mapAddressBook.count(address))
             ret.push_back(Pair("account", pwalletMain->mapAddressBook[address]));
     }
     return ret;
 }
-
 
 Value getwork(const Array& params, bool fHelp)
 {
@@ -1759,7 +1857,14 @@ Value getmemorypool(const Array& params, bool fHelp)
         result.push_back(Pair("transactions", transactions));
         result.push_back(Pair("coinbasevalue", (int64_t)pblock->vtx[0].vout[0].nValue));
         result.push_back(Pair("time", (int64_t)pblock->nTime));
-        result.push_back(Pair("bits", (int64_t)pblock->nBits));
+
+        union {
+            int32_t nBits;
+            char cBits[4];
+        } uBits;
+        uBits.nBits = htonl((int32_t)pblock->nBits);
+        result.push_back(Pair("bits", HexStr(BEGIN(uBits.cBits), END(uBits.cBits))));
+
         return result;
     }
     else
@@ -1820,16 +1925,19 @@ pair<string, rpcfn_type> pCallTable[] =
     make_pair("move",                   &movecmd),
     make_pair("sendfrom",               &sendfrom),
     make_pair("sendmany",               &sendmany),
+    make_pair("addmultisigaddress",     &addmultisigaddress),
     make_pair("gettransaction",         &gettransaction),
     make_pair("listtransactions",       &listtransactions),
-    make_pair("signmessage",           &signmessage),
-    make_pair("verifymessage",         &verifymessage),
+    make_pair("signmessage",            &signmessage),
+    make_pair("verifymessage",          &verifymessage),
     make_pair("getwork",                &getwork),
     make_pair("getworkex",                &getworkex),
     make_pair("listaccounts",           &listaccounts),
     make_pair("settxfee",               &settxfee),
     make_pair("getmemorypool",          &getmemorypool),
-    make_pair("listsinceblock",        &listsinceblock),
+    make_pair("listsinceblock",         &listsinceblock),
+    make_pair("dumpprivkey",            &dumpprivkey),
+    make_pair("importprivkey",          &importprivkey)
 };
 map<string, rpcfn_type> mapCallTable(pCallTable, pCallTable + sizeof(pCallTable)/sizeof(pCallTable[0]));
 
@@ -1838,7 +1946,7 @@ string pAllowInSafeMode[] =
     "help",
     "stop",
     "getblockcount",
-    "getblocknumber",
+    "getblocknumber",  // deprecated
     "getconnectioncount",
     "getdifficulty",
     "getgenerate",
@@ -2010,12 +2118,7 @@ bool HTTPAuthorized(map<string, string>& mapHeaders)
         return false;
     string strUserPass64 = strAuth.substr(6); boost::trim(strUserPass64);
     string strUserPass = DecodeBase64(strUserPass64);
-    string::size_type nColon = strUserPass.find(":");
-    if (nColon == string::npos)
-        return false;
-    string strUser = strUserPass.substr(0, nColon);
-    string strPassword = strUserPass.substr(nColon+1);
-    return (strUser == mapArgs["-rpcuser"] && strPassword == mapArgs["-rpcpassword"]);
+    return strUserPass == strRPCUserColonPass;
 }
 
 //
@@ -2148,7 +2251,8 @@ void ThreadRPCServer2(void* parg)
 {
     printf("ThreadRPCServer started\n");
 
-    if (mapArgs["-rpcuser"] == "" && mapArgs["-rpcpassword"] == "")
+    strRPCUserColonPass = mapArgs["-rpcuser"] + ":" + mapArgs["-rpcpassword"];
+    if (strRPCUserColonPass == ":")
     {
         string strWhatAmI = "To use bitcoind";
         if (mapArgs.count("-server"))
@@ -2156,11 +2260,13 @@ void ThreadRPCServer2(void* parg)
         else if (mapArgs.count("-daemon"))
             strWhatAmI = strprintf(_("To use the %s option"), "\"-daemon\"");
         PrintConsole(
-            _("Warning: %s, you must set rpcpassword=<password>\nin the configuration file: %s\n"
+            _("Error: %s, you must set rpcpassword=<password>\nin the configuration file: %s\n"
               "If the file does not exist, create it with owner-readable-only file permissions.\n"),
                 strWhatAmI.c_str(),
                 GetConfigFile().c_str());
+#ifndef QT_GUI
         CreateThread(Shutdown, NULL);
+#endif
         return;
     }
 
@@ -2465,6 +2571,15 @@ int CommandLineRPC(int argc, char *argv[])
             params[1] = v.get_obj();
         }
         if (strMethod == "sendmany"                && n > 2) ConvertTo<boost::int64_t>(params[2]);
+        if (strMethod == "addmultisigaddress"      && n > 0) ConvertTo<boost::int64_t>(params[0]);
+        if (strMethod == "addmultisigaddress"      && n > 1)
+        {
+            string s = params[1].get_str();
+            Value v;
+            if (!read_string(s, v) || v.type() != array_type)
+                throw runtime_error("addmultisigaddress: type mismatch "+s);
+            params[1] = v.get_array();
+        }
 
         // Execute
         Object reply = CallRPC(strMethod, params);

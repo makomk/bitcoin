@@ -2,11 +2,32 @@
 #include <boost/test/unit_test.hpp>
 #include <boost/foreach.hpp>
 
-#include "../util.h"
+#include "main.h"
+#include "wallet.h"
+#include "util.h"
 
 using namespace std;
 
 BOOST_AUTO_TEST_SUITE(util_tests)
+
+BOOST_AUTO_TEST_CASE(util_criticalsection)
+{
+    CCriticalSection cs;
+
+    do {
+        CRITICAL_BLOCK(cs)
+            break;
+
+        BOOST_ERROR("break was swallowed!");
+    } while(0);
+
+    do {
+        TRY_CRITICAL_BLOCK(cs)
+            break;
+
+        BOOST_ERROR("break was swallowed!");
+    } while(0);
+}
 
 BOOST_AUTO_TEST_CASE(util_MedianFilter)
 {    

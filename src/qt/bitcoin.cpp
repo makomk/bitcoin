@@ -16,6 +16,7 @@
 #include <QLocale>
 #include <QTranslator>
 #include <QSplashScreen>
+#include <QLibraryInfo>
 
 // Need a global reference for the notifications to find the GUI
 BitcoinGUI *guiref;
@@ -90,6 +91,8 @@ void UIThreadCall(boost::function0<void> fn)
 
 void MainFrameRepaint()
 {
+    if(guiref)
+        QMetaObject::invokeMethod(guiref, "refreshStatusBar", Qt::QueuedConnection);
 }
 
 void InitMessage(const std::string &message)
@@ -111,17 +114,40 @@ std::string _(const char* psz)
 
 int main(int argc, char *argv[])
 {
+    // Internal string conversion is all UTF-8
     QTextCodec::setCodecForTr(QTextCodec::codecForName("UTF-8"));
     QTextCodec::setCodecForCStrings(QTextCodec::codecForTr());
 
     Q_INIT_RESOURCE(bitcoin);
     QApplication app(argc, argv);
 
-    // Load language file for system locale
-    QString locale = QLocale::system().name();
-    QTranslator translator;
-    translator.load(":/translations/"+locale);
-    app.installTranslator(&translator);
+    ParseParameters(argc, argv);
+
+    // Load language files for system locale:
+    // - First load the translator for the base language, without territory
+    // - Then load the more specific locale translator
+    QString lang_territory = QLocale::system().name(); // "en_US"
+    QString lang = lang_territory;
+    lang.truncate(lang_territory.lastIndexOf('_')); // "en"
+    QTranslator qtTranslatorBase, qtTranslator, translatorBase, translator;
+
+    qtTranslatorBase.load(QLibraryInfo::location(QLibraryInfo::TranslationsPath) + "/qt_" + lang);
+    if (!qtTranslatorBase.isEmpty())
+        app.installTranslator(&qtTranslatorBase);
+
+    qtTranslator.load(QLibraryInfo::location(QLibraryInfo::TranslationsPath) + "/qt_" + lang_territory);
+    if (!qtTranslator.isEmpty())
+        app.installTranslator(&qtTranslator);
+
+    translatorBase.load(":/translations/"+lang);
+    if (!translatorBase.isEmpty())
+        app.installTranslator(&translatorBase);
+
+    translator.load(":/translations/"+lang_territory);
+    if (!translator.isEmpty())
+        app.installTranslator(&translator);
+
+    app.setApplicationName(QApplication::translate("main", "Bitcoin-Qt"));
 
     QSplashScreen splash(QPixmap(":/images/splash"), 0);
     splash.show();
@@ -138,7 +164,7 @@ int main(int argc, char *argv[])
         {
             {
                 // Put this in a block, so that BitcoinGUI is cleaned up properly before
-                // calling Shutdown().
+                // calling Shutdown() in case of exceptions.
                 BitcoinGUI window;
                 splash.finish(&window);
                 OptionsModel optionsModel(pwalletMain);
@@ -149,7 +175,15 @@ int main(int argc, char *argv[])
                 window.setClientModel(&clientModel);
                 window.setWalletModel(&walletModel);
 
-                window.show();
+                // If -min option passed, start window minimized.
+                if(GetBoolArg("-min"))
+                {
+                    window.showMinimized();
+                }
+                else
+                {
+                    window.show();
+                }
 
                 app.exec();
 

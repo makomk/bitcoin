@@ -32,6 +32,7 @@ void ThreadOpenConnections2(void* parg);
 #ifdef USE_UPNP
 void ThreadMapPort2(void* parg);
 #endif
+void ThreadDNSAddressSeed2(void* parg);
 bool OpenNetworkConnection(const CAddress& addrConnect);
 
 
@@ -248,8 +249,8 @@ bool Lookup(const char *pszName, vector<CAddress>& vaddr, int nServices, int nMa
             else
                 pszColon[0] = 0;
             port = portParsed;
-            if (port < 0 || port > USHRT_MAX)
-                port = USHRT_MAX;
+            if (port < 0 || port > std::numeric_limits<unsigned short>::max())
+                port = std::numeric_limits<unsigned short>::max();
         }
     }
 
@@ -726,6 +727,21 @@ void CNode::Cleanup()
 }
 
 
+void CNode::PushVersion()
+{
+    /// when NTP implemented, change to just nTime = GetAdjustedTime()
+    int64 nTime = (fInbound ? GetAdjustedTime() : GetTime());
+    CAddress addrYou = (fUseProxy ? CAddress("0.0.0.0") : addr);
+    CAddress addrMe = (fUseProxy ? CAddress("0.0.0.0") : addrLocalHost);
+    RAND_bytes((unsigned char*)&nLocalHostNonce, sizeof(nLocalHostNonce));
+    PushMessage("version", PROTOCOL_VERSION, nLocalServices, nTime, addrYou, addrMe,
+                nLocalHostNonce, FormatSubVersion(CLIENT_NAME, CLIENT_VERSION, std::vector<string>()), nBestHeight);
+}
+
+
+
+
+
 std::map<unsigned int, int64> CNode::setBanned;
 CCriticalSection CNode::cs_setBanned;
 
@@ -1131,11 +1147,17 @@ void ThreadMapPort2(void* parg)
     const char * rootdescurl = 0;
     const char * multicastif = 0;
     const char * minissdpdpath = 0;
-    int error = 0;
     struct UPNPDev * devlist = 0;
     char lanaddr[64];
 
+#ifndef UPNPDISCOVER_SUCCESS
+    /* miniupnpc 1.5 */
+    devlist = upnpDiscover(2000, multicastif, minissdpdpath, 0);
+#else
+    /* miniupnpc 1.6 */
+    int error = 0;
     devlist = upnpDiscover(2000, multicastif, minissdpdpath, 0, 0, &error);
+#endif
 
     struct UPNPUrls urls;
     struct IGDdatas data;
@@ -1147,8 +1169,15 @@ void ThreadMapPort2(void* parg)
         char intClient[16];
         char intPort[6];
         string strDesc = "Bitcoin " + FormatFullVersion();
+#ifndef UPNPDISCOVER_SUCCESS
+    /* miniupnpc 1.5 */
+        r = UPNP_AddPortMapping(urls.controlURL, data.first.servicetype,
+	                        port, port, lanaddr, strDesc.c_str(), "TCP", 0);
+#else
+    /* miniupnpc 1.6 */
         r = UPNP_AddPortMapping(urls.controlURL, data.first.servicetype,
 	                        port, port, lanaddr, strDesc.c_str(), "TCP", 0, "0");
+#endif
 
         if(r!=UPNPCOMMAND_SUCCESS)
             printf("AddPortMapping(%s, %s, %s) failed with code %d (%s)\n",
@@ -1210,12 +1239,33 @@ void MapPort(bool /* unused fMapPort */)
 
 static const char *strDNSSeed[] = {
     "bitseed.xf2.org",
-    "bitseed.bitcoin.org.uk",
     "dnsseed.bluematt.me",
+    "seed.bitcoin.sipa.be",
+    "dnsseed.bitcoin.dashjr.org",
 };
 
-void DNSAddressSeed()
+void ThreadDNSAddressSeed(void* parg)
 {
+    IMPLEMENT_RANDOMIZE_STACK(ThreadDNSAddressSeed(parg));
+    try
+    {
+        vnThreadsRunning[6]++;
+        ThreadDNSAddressSeed2(parg);
+        vnThreadsRunning[6]--;
+    }
+    catch (std::exception& e) {
+        vnThreadsRunning[6]--;
+        PrintException(&e, "ThreadDNSAddressSeed()");
+    } catch (...) {
+        vnThreadsRunning[6]--;
+        throw; // support pthread_cancel()
+    }
+    printf("ThreadDNSAddressSeed exiting\n");
+}
+
+void ThreadDNSAddressSeed2(void* parg)
+{
+    printf("ThreadDNSAddressSeed started\n");
     int found = 0;
 
     if (!fTestNet)
@@ -1245,6 +1295,15 @@ void DNSAddressSeed()
 
     printf("%d addresses found from DNS seeds\n", found);
 }
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1429,7 +1488,7 @@ void ThreadOpenConnections2(void* parg)
         // Choose an address to connect to based on most recently seen
         //
         CAddress addrConnect;
-        int64 nBest = INT64_MIN;
+        int64 nBest = std::numeric_limits<int64>::min();
 
         // Only connect to one address per a.b.?.? range.
         // Do this here so we don't have to critsect vNodes inside mapAddresses critsect.
@@ -1758,6 +1817,12 @@ void StartNode(void* parg)
     // Start threads
     //
 
+    if (GetBoolArg("-nodnsseed"))
+        printf("DNS seeding disabled\n");
+    else
+        if (!CreateThread(ThreadDNSAddressSeed, NULL))
+            printf("Error: CreateThread(ThreadDNSAddressSeed) failed\n");
+
     // Map ports with UPnP
     if (fHaveUPnP)
         MapPort(fUseUPnP);
@@ -1804,6 +1869,7 @@ bool StopNode()
     if (vnThreadsRunning[3] > 0) printf("ThreadBitcoinMiner still running\n");
     if (vnThreadsRunning[4] > 0) printf("ThreadRPCServer still running\n");
     if (fHaveUPnP && vnThreadsRunning[5] > 0) printf("ThreadMapPort still running\n");
+    if (vnThreadsRunning[6] > 0) printf("ThreadDNSAddressSeed still running\n");
     while (vnThreadsRunning[2] > 0 || vnThreadsRunning[4] > 0)
         Sleep(20);
     Sleep(50);

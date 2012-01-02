@@ -40,7 +40,6 @@ CNode* ConnectNode(CAddress addrConnect, int64 nTimeout=0);
 void AbandonRequests(void (*fn)(void*, CDataStream&), void* param1);
 bool AnySubscribed(unsigned int nChannel);
 void MapPort(bool fMapPort);
-void DNSAddressSeed();
 bool BindListenPort(std::string& strError=REF(std::string()));
 void StartNode(void* parg);
 bool StopNode();
@@ -356,18 +355,8 @@ public:
 
 
 
-    void PushVersion()
-    {
-        /// when NTP implemented, change to just nTime = GetAdjustedTime()
-        int64 nTime = (fInbound ? GetAdjustedTime() : GetTime());
-        CAddress addrYou = (fUseProxy ? CAddress("0.0.0.0") : addr);
-        CAddress addrMe = (fUseProxy ? CAddress("0.0.0.0") : addrLocalHost);
-        RAND_bytes((unsigned char*)&nLocalHostNonce, sizeof(nLocalHostNonce));
-        PushMessage("version", VERSION, nLocalServices, nTime, addrYou, addrMe,
-                    nLocalHostNonce, std::string(pszSubVer), nBestHeight);
-    }
 
-
+    void PushVersion();
 
 
     void PushMessage(const char* pszCommand)
