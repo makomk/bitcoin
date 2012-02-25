@@ -1354,8 +1354,6 @@ bool CBlock::SetBestChain(CTxDB& txdb, CBlockIndex* pindexNew)
 
     if (!fInitialDownload)
     {
-        pMakeWork->UpdateWork(true);
-
         // Support block notification
         std::string strCmd = GetArg("-blocknotify", "");
         if (!strCmd.empty())
