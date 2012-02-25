@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #include "headers.h"
@@ -400,26 +400,36 @@ bool ParseMoney(const char* pszIn, int64& nRet)
 }
 
 
+static char phexdigit[256] =
+{ -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  0,1,2,3,4,5,6,7,8,9,-1,-1,-1,-1,-1,-1,
+  -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+  -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, };
+
+bool IsHex(const string& str)
+{
+    BOOST_FOREACH(unsigned char c, str)
+    {
+        if (phexdigit[c] < 0)
+            return false;
+    }
+    return (str.size() > 0) && (str.size()%2 == 0);
+}
+
 vector<unsigned char> ParseHex(const char* psz)
 {
-    static char phexdigit[256] =
-    { -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      0,1,2,3,4,5,6,7,8,9,-1,-1,-1,-1,-1,-1,
-      -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,0xa,0xb,0xc,0xd,0xe,0xf,-1,-1,-1,-1,-1,-1,-1,-1,-1
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, };
-
     // convert hex dump to vector
     vector<unsigned char> vch;
     loop
@@ -444,7 +454,22 @@ vector<unsigned char> ParseHex(const string& str)
     return ParseHex(str.c_str());
 }
 
-void ParseParameters(int argc, char* argv[])
+static void InterpretNegativeSetting(string name, map<string, string>& mapSettingsRet)
+{
+    // interpret -nofoo as -foo=0 (and -nofoo=0 as -foo=1) as long as -foo not set
+    if (name.find("-no") == 0)
+    {
+        std::string positive("-");
+        positive.append(name.begin()+3, name.end());
+        if (mapSettingsRet.count(positive) == 0)
+        {
+            bool value = !GetBoolArg(name);
+            mapSettingsRet[positive] = (value ? "1" : "0");
+        }
+    }
+}
+
+void ParseParameters(int argc, const char*const argv[])
 {
     mapArgs.clear();
     mapMultiArgs.clear();
@@ -465,9 +490,53 @@ void ParseParameters(int argc, char* argv[])
         #endif
         if (psz[0] != '-')
             break;
+
         mapArgs[psz] = pszValue;
         mapMultiArgs[psz].push_back(pszValue);
     }
+
+    // New 0.6 features:
+    BOOST_FOREACH(const PAIRTYPE(string,string)& entry, mapArgs)
+    {
+        string name = entry.first;
+
+        //  interpret --foo as -foo (as long as both are not set)
+        if (name.find("--") == 0)
+        {
+            std::string singleDash(name.begin()+1, name.end());
+            if (mapArgs.count(singleDash) == 0)
+                mapArgs[singleDash] = entry.second;
+            name = singleDash;
+        }
+
+        // interpret -nofoo as -foo=0 (and -nofoo=0 as -foo=1) as long as -foo not set
+        InterpretNegativeSetting(name, mapArgs);
+    }
+}
+
+std::string GetArg(const std::string& strArg, const std::string& strDefault)
+{
+    if (mapArgs.count(strArg))
+        return mapArgs[strArg];
+    return strDefault;
+}
+
+int64 GetArg(const std::string& strArg, int64 nDefault)
+{
+    if (mapArgs.count(strArg))
+        return atoi64(mapArgs[strArg]);
+    return nDefault;
+}
+
+bool GetBoolArg(const std::string& strArg, bool fDefault)
+{
+    if (mapArgs.count(strArg))
+    {
+        if (mapArgs[strArg].empty())
+            return true;
+        return (atoi(mapArgs[strArg]) != 0);
+    }
+    return fDefault;
 }
 
 bool SoftSetArg(const std::string& strArg, const std::string& strValue)
@@ -478,7 +547,7 @@ bool SoftSetArg(const std::string& strArg, const std::string& strValue)
     return true;
 }
 
-bool SoftSetArg(const std::string& strArg, bool fValue)
+bool SoftSetBoolArg(const std::string& strArg, bool fValue)
 {
     if (fValue)
         return SoftSetArg(strArg, std::string("1"));
@@ -857,7 +926,11 @@ void ReadConfigFile(map<string, string>& mapSettingsRet,
         // Don't overwrite existing settings so command line settings override bitcoin.conf
         string strKey = string("-") + it->string_key;
         if (mapSettingsRet.count(strKey) == 0)
+        {
             mapSettingsRet[strKey] = it->value[0];
+            //  interpret nofoo=1 as foo=0 (and nofoo=0 as foo=1) as long as foo not set)
+            InterpretNegativeSetting(strKey, mapSettingsRet);
+        }
         mapMultiSettingsRet[strKey].push_back(it->value[0]);
     }
 }
@@ -948,12 +1021,12 @@ int64 GetAdjustedTime()
     return GetTime() + nTimeOffset;
 }
 
-void AddTimeData(unsigned int ip, int64 nTime)
+void AddTimeData(const CNetAddr& ip, int64 nTime)
 {
     int64 nOffsetSample = nTime - GetTime();
 
     // Ignore duplicates
-    static set<unsigned int> setKnown;
+    static set<CNetAddr> setKnown;
     if (!setKnown.insert(ip).second)
         return;
 
@@ -1000,7 +1073,6 @@ void AddTimeData(unsigned int ip, int64 nTime)
         printf("nTimeOffset = %+"PRI64d"  (%+"PRI64d" minutes)\n", nTimeOffset, nTimeOffset/60);
     }
 }
-
 
 
 
@@ -1144,7 +1216,18 @@ static void pop_lock()
 void CCriticalSection::Enter(const char* pszName, const char* pszFile, int nLine)
 {
     push_lock(this, CLockLocation(pszName, pszFile, nLine));
+#ifdef DEBUG_LOCKCONTENTION
+    bool result = mutex.try_lock();
+    if (!result)
+    {
+        printf("LOCKCONTENTION: %s\n", pszName);
+        printf("Locker: %s:%d\n", pszFile, nLine);
+        mutex.lock();
+        printf("Locked\n");
+    }
+#else
     mutex.lock();
+#endif
 }
 void CCriticalSection::Leave()
 {
@@ -1161,9 +1244,19 @@ bool CCriticalSection::TryEnter(const char* pszName, const char* pszFile, int nL
 
 #else
 
-void CCriticalSection::Enter(const char*, const char*, int)
+void CCriticalSection::Enter(const char* pszName, const char* pszFile, int nLine)
 {
+#ifdef DEBUG_LOCKCONTENTION
+    bool result = mutex.try_lock();
+    if (!result)
+    {
+        printf("LOCKCONTENTION: %s\n", pszName);
+        printf("Locker: %s:%d\n", pszFile, nLine);
+        mutex.lock();
+    }
+#else
     mutex.lock();
+#endif
 }
 
 void CCriticalSection::Leave()
@@ -1178,3 +1271,4 @@ bool CCriticalSection::TryEnter(const char*, const char*, int)
 }
 
 #endif /* DEBUG_LOCKORDER */
+

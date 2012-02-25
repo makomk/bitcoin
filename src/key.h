@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #ifndef BITCOIN_KEY_H
@@ -59,14 +59,28 @@ class CKey
 protected:
     EC_KEY* pkey;
     bool fSet;
+    bool fCompressedPubKey;
+
+    void SetCompressedPubKey()
+    {
+        EC_KEY_set_conv_form(pkey, POINT_CONVERSION_COMPRESSED);
+        fCompressedPubKey = true;
+    }
 
 public:
-    CKey()
+
+    void Reset()
     {
+        fCompressedPubKey = false;
         pkey = EC_KEY_new_by_curve_name(NID_secp256k1);
         if (pkey == NULL)
             throw key_error("CKey::CKey() : EC_KEY_new_by_curve_name failed");
         fSet = false;
+    }
+
+    CKey()
+    {
+        Reset();
     }
 
     CKey(const CKey& b)
@@ -95,10 +109,17 @@ public:
         return !fSet;
     }
 
-    void MakeNewKey()
+    bool IsCompressed() const
+    {
+        return fCompressedPubKey;
+    }
+
+    void MakeNewKey(bool fCompressed)
     {
         if (!EC_KEY_generate_key(pkey))
             throw key_error("CKey::MakeNewKey() : EC_KEY_generate_key failed");
+        if (fCompressed)
+            SetCompressedPubKey();
         fSet = true;
     }
 
@@ -111,7 +132,7 @@ public:
         return true;
     }
 
-    bool SetSecret(const CSecret& vchSecret)
+    bool SetSecret(const CSecret& vchSecret, bool fCompressed = false)
     {
         EC_KEY_free(pkey);
         pkey = EC_KEY_new_by_curve_name(NID_secp256k1);
@@ -120,16 +141,21 @@ public:
         if (vchSecret.size() != 32)
             throw key_error("CKey::SetSecret() : secret must be 32 bytes");
         BIGNUM *bn = BN_bin2bn(&vchSecret[0],32,BN_new());
-        if (bn == NULL) 
+        if (bn == NULL)
             throw key_error("CKey::SetSecret() : BN_bin2bn failed");
         if (!EC_KEY_regenerate_key(pkey,bn))
+        {
+            BN_clear_free(bn);
             throw key_error("CKey::SetSecret() : EC_KEY_regenerate_key failed");
+        }
         BN_clear_free(bn);
         fSet = true;
+        if (fCompressed || fCompressedPubKey)
+            SetCompressedPubKey();
         return true;
     }
 
-    CSecret GetSecret() const
+    CSecret GetSecret(bool &fCompressed) const
     {
         CSecret vchRet;
         vchRet.resize(32);
@@ -140,6 +166,7 @@ public:
         int n=BN_bn2bin(bn,&vchRet[32 - nBytes]);
         if (n != nBytes) 
             throw key_error("CKey::GetSecret(): BN_bn2bin failed");
+        fCompressed = fCompressedPubKey;
         return vchRet;
     }
 
@@ -161,6 +188,8 @@ public:
         if (!o2i_ECPublicKey(&pkey, &pbegin, vchPubKey.size()))
             return false;
         fSet = true;
+        if (vchPubKey.size() == 33)
+            SetCompressedPubKey();
         return true;
     }
 
@@ -210,6 +239,8 @@ public:
             {
                 CKey keyRec;
                 keyRec.fSet = true;
+                if (fCompressedPubKey)
+                    keyRec.SetCompressedPubKey();
                 if (ECDSA_SIG_recover_key_GFp(keyRec.pkey, sig, (unsigned char*)&hash, sizeof(hash), i, 1) == 1)
                     if (keyRec.GetPubKey() == this->GetPubKey())
                     {
@@ -221,7 +252,7 @@ public:
             if (nRecId == -1)
                 throw key_error("CKey::SignCompact() : unable to construct recoverable key");
 
-            vchSig[0] = nRecId+27;
+            vchSig[0] = nRecId+27+(fCompressedPubKey ? 4 : 0);
             BN_bn2bin(sig->r,&vchSig[33-(nBitsR+7)/8]);
             BN_bn2bin(sig->s,&vchSig[65-(nBitsS+7)/8]);
             fOk = true;
@@ -238,7 +269,8 @@ public:
     {
         if (vchSig.size() != 65)
             return false;
-        if (vchSig[0]<27 || vchSig[0]>=31)
+        int nV = vchSig[0];
+        if (nV<27 || nV>=35)
             return false;
         ECDSA_SIG *sig = ECDSA_SIG_new();
         BN_bin2bn(&vchSig[1],32,sig->r);
@@ -246,7 +278,12 @@ public:
 
         EC_KEY_free(pkey);
         pkey = EC_KEY_new_by_curve_name(NID_secp256k1);
-        if (ECDSA_SIG_recover_key_GFp(pkey, sig, (unsigned char*)&hash, sizeof(hash), vchSig[0] - 27, 0) == 1)
+        if (nV >= 31)
+        {
+            SetCompressedPubKey();
+            nV -= 4;
+        }
+        if (ECDSA_SIG_recover_key_GFp(pkey, sig, (unsigned char*)&hash, sizeof(hash), nV - 27, 0) == 1)
         {
             fSet = true;
             ECDSA_SIG_free(sig);
@@ -272,6 +309,18 @@ public:
         if (GetPubKey() != key.GetPubKey())
             return false;
         return true;
+    }
+
+    bool IsValid()
+    {
+        if (!fSet)
+            return false;
+
+        bool fCompr;
+        CSecret secret = GetSecret(fCompr);
+        CKey key2;
+        key2.SetSecret(secret, fCompr);
+        return GetPubKey() == key2.GetPubKey();
     }
 };
 

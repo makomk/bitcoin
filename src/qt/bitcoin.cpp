@@ -1,5 +1,5 @@
 /*
- * W.J. van der Laan 2011
+ * W.J. van der Laan 20011-2012
  */
 #include "bitcoingui.h"
 #include "clientmodel.h"
@@ -8,6 +8,7 @@
 
 #include "headers.h"
 #include "init.h"
+#include "qtipcserver.h"
 
 #include <QApplication>
 #include <QMessageBox>
@@ -18,24 +19,18 @@
 #include <QSplashScreen>
 #include <QLibraryInfo>
 
+#include <boost/interprocess/ipc/message_queue.hpp>
+
 // Need a global reference for the notifications to find the GUI
 BitcoinGUI *guiref;
 QSplashScreen *splashref;
 
 int MyMessageBox(const std::string& message, const std::string& caption, int style, wxWindow* parent, int x, int y)
 {
-    // Message from main thread
-    if(guiref)
-    {
-        guiref->error(QString::fromStdString(caption),
-                      QString::fromStdString(message));
-    }
-    else
-    {
-        QMessageBox::critical(0, QString::fromStdString(caption),
-            QString::fromStdString(message),
-            QMessageBox::Ok, QMessageBox::Ok);
-    }
+    // Message from AppInit2(), always in main thread before main window is constructed
+    QMessageBox::critical(0, QString::fromStdString(caption),
+        QString::fromStdString(message),
+        QMessageBox::Ok, QMessageBox::Ok);
     return 4;
 }
 
@@ -79,6 +74,22 @@ bool ThreadSafeAskFee(int64 nFeeRequired, const std::string& strCaption, wxWindo
     return payFee;
 }
 
+void ThreadSafeHandleURL(const std::string& strURL)
+{
+    if(!guiref)
+        return;
+
+    // Call slot on GUI thread.
+    // If called from another thread, use a blocking QueuedConnection.
+    Qt::ConnectionType connectionType = Qt::DirectConnection;
+    if(QThread::currentThread() != QCoreApplication::instance()->thread())
+    {
+        connectionType = Qt::BlockingQueuedConnection;
+    }
+    QMetaObject::invokeMethod(guiref, "handleURL", connectionType,
+                               Q_ARG(QString, QString::fromStdString(strURL)));
+}
+
 void CalledSetStatusBar(const std::string& strText, int nField)
 {
     // Only used for built-in mining, which is disabled, simple ignore
@@ -112,8 +123,28 @@ std::string _(const char* psz)
     return QCoreApplication::translate("bitcoin-core", psz).toStdString();
 }
 
+#ifndef BITCOIN_QT_TEST
 int main(int argc, char *argv[])
 {
+    // Do this early as we don't want to bother initializing if we are just calling IPC
+    for (int i = 1; i < argc; i++)
+    {
+        if (strlen(argv[i]) > 7 && strncasecmp(argv[i], "bitcoin:", 8) == 0)
+        {
+            const char *strURL = argv[i];
+            try {
+                boost::interprocess::message_queue mq(boost::interprocess::open_only, "BitcoinURL");
+                if(mq.try_send(strURL, strlen(strURL), 0))
+                    exit(0);
+                else
+                    break;
+            }
+            catch (boost::interprocess::interprocess_exception &ex) {
+                break;
+            }
+        }
+    }
+
     // Internal string conversion is all UTF-8
     QTextCodec::setCodecForTr(QTextCodec::codecForName("UTF-8"));
     QTextCodec::setCodecForCStrings(QTextCodec::codecForTr());
@@ -123,11 +154,13 @@ int main(int argc, char *argv[])
 
     ParseParameters(argc, argv);
 
-    // Load language files for system locale:
+    // Get desired locale ("en_US") from command line or system locale
+    QString lang_territory = QString::fromStdString(GetArg("-lang", QLocale::system().name().toStdString()));
+    // Load language files for configured locale:
     // - First load the translator for the base language, without territory
     // - Then load the more specific locale translator
-    QString lang_territory = QLocale::system().name(); // "en_US"
     QString lang = lang_territory;
+
     lang.truncate(lang_territory.lastIndexOf('_')); // "en"
     QTranslator qtTranslatorBase, qtTranslator, translatorBase, translator;
 
@@ -150,9 +183,12 @@ int main(int argc, char *argv[])
     app.setApplicationName(QApplication::translate("main", "Bitcoin-Qt"));
 
     QSplashScreen splash(QPixmap(":/images/splash"), 0);
-    splash.show();
-    splash.setAutoFillBackground(true);
-    splashref = &splash;
+    if (GetBoolArg("-splash", true) && !GetBoolArg("-min"))
+    {
+        splash.show();
+        splash.setAutoFillBackground(true);
+        splashref = &splash;
+    }
 
     app.processEvents();
 
@@ -166,7 +202,8 @@ int main(int argc, char *argv[])
                 // Put this in a block, so that BitcoinGUI is cleaned up properly before
                 // calling Shutdown() in case of exceptions.
                 BitcoinGUI window;
-                splash.finish(&window);
+                if (splashref)
+                    splash.finish(&window);
                 OptionsModel optionsModel(pwalletMain);
                 ClientModel clientModel(&optionsModel);
                 WalletModel walletModel(pwalletMain, &optionsModel);
@@ -183,6 +220,23 @@ int main(int argc, char *argv[])
                 else
                 {
                     window.show();
+                }
+
+                // Place this here as guiref has to be defined if we dont want to lose URLs
+                ipcInit();
+                // Check for URL in argv
+                for (int i = 1; i < argc; i++)
+                {
+                    if (strlen(argv[i]) > 7 && strncasecmp(argv[i], "bitcoin:", 8) == 0)
+                    {
+                        const char *strURL = argv[i];
+                        try {
+                            boost::interprocess::message_queue mq(boost::interprocess::open_only, "BitcoinURL");
+                            mq.try_send(strURL, strlen(strURL), 0);
+                        }
+                        catch (boost::interprocess::interprocess_exception &ex) {
+                        }
+                    }
                 }
 
                 app.exec();
@@ -202,3 +256,4 @@ int main(int argc, char *argv[])
     }
     return 0;
 }
+#endif // BITCOIN_QT_TEST

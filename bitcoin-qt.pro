@@ -1,6 +1,6 @@
 TEMPLATE = app
 TARGET =
-VERSION = 0.5.99
+VERSION = 0.6.0
 INCLUDEPATH += src src/json src/qt
 DEFINES += QT_GUI BOOST_THREAD_USE_LIB
 CONFIG += no_include_pwd
@@ -19,14 +19,6 @@ OBJECTS_DIR = build
 MOC_DIR = build
 UI_DIR = build
 
-# use: qmake "USE_QRCODE=1"
-# libqrencode (http://fukuchi.org/works/qrencode/index.en.html) must be installed for support
-contains(USE_QRCODE, 1) {
-    message(Building with QRCode support)
-    DEFINES += USE_QRCODE
-    LIBS += -lqrencode
-}
-
 # use: qmake "RELEASE=1"
 contains(RELEASE, 1) {
     # Mac: compile for maximum compatibility (10.5, 32-bit)
@@ -36,6 +28,14 @@ contains(RELEASE, 1) {
         # Linux: static link
         LIBS += -Wl,-Bstatic
     }
+}
+
+# use: qmake "USE_QRCODE=1"
+# libqrencode (http://fukuchi.org/works/qrencode/index.en.html) must be installed for support
+contains(USE_QRCODE, 1) {
+    message(Building with QRCode support)
+    DEFINES += USE_QRCODE
+    LIBS += -lqrencode
 }
 
 # use: qmake "USE_UPNP=1" ( enabled by default; default)
@@ -68,9 +68,15 @@ contains(USE_SSL, 1) {
     DEFINES += USE_SSL
 }
 
+# use: qmake "FIRST_CLASS_MESSAGING=1"
+contains(FIRST_CLASS_MESSAGING, 1) {
+    message(Building with first-class messaging)
+    DEFINES += FIRST_CLASS_MESSAGING
+}
+
 contains(BITCOIN_NEED_QT_PLUGINS, 1) {
     DEFINES += BITCOIN_NEED_QT_PLUGINS
-    QTPLUGIN += qcncodecs qjpcodecs qtwcodecs qkrcodecs
+    QTPLUGIN += qcncodecs qjpcodecs qtwcodecs qkrcodecs qtaccessiblewidgets
 }
 
 !windows {
@@ -91,12 +97,14 @@ HEADERS += src/qt/bitcoingui.h \
     src/qt/optionsdialog.h \
     src/qt/sendcoinsdialog.h \
     src/qt/addressbookpage.h \
+    src/qt/messagepage.h \
     src/qt/aboutdialog.h \
     src/qt/editaddressdialog.h \
     src/qt/bitcoinaddressvalidator.h \
     src/base58.h \
     src/bignum.h \
     src/checkpoints.h \
+    src/compat.h \
     src/util.h \
     src/uint256.h \
     src/serialize.h \
@@ -145,7 +153,8 @@ HEADERS += src/qt/bitcoingui.h \
     src/qt/qvaluecombobox.h \
     src/qt/askpassphrasedialog.h \
     src/protocol.h \
-    src/qt/notificator.h
+    src/qt/notificator.h \
+    src/qt/qtipcserver.h
 
 SOURCES += src/qt/bitcoin.cpp src/qt/bitcoingui.cpp \
     src/qt/transactiontablemodel.cpp \
@@ -153,10 +162,12 @@ SOURCES += src/qt/bitcoin.cpp src/qt/bitcoingui.cpp \
     src/qt/optionsdialog.cpp \
     src/qt/sendcoinsdialog.cpp \
     src/qt/addressbookpage.cpp \
+    src/qt/messagepage.cpp \
     src/qt/aboutdialog.cpp \
     src/qt/editaddressdialog.cpp \
     src/qt/bitcoinaddressvalidator.cpp \
     src/util.cpp \
+    src/netbase.cpp \
     src/key.cpp \
     src/script.cpp \
     src/main.cpp \
@@ -194,7 +205,8 @@ SOURCES += src/qt/bitcoin.cpp src/qt/bitcoingui.cpp \
     src/qt/qvaluecombobox.cpp \
     src/qt/askpassphrasedialog.cpp \
     src/protocol.cpp \
-    src/qt/notificator.cpp
+    src/qt/notificator.cpp \
+    src/qt/qtipcserver.cpp
 
 RESOURCES += \
     src/qt/bitcoin.qrc
@@ -202,6 +214,7 @@ RESOURCES += \
 FORMS += \
     src/qt/forms/sendcoinsdialog.ui \
     src/qt/forms/addressbookpage.ui \
+    src/qt/forms/messagepage.ui \
     src/qt/forms/aboutdialog.ui \
     src/qt/forms/editaddressdialog.ui \
     src/qt/forms/transactiondescdialog.ui \
@@ -213,6 +226,16 @@ contains(USE_QRCODE, 1) {
 HEADERS += src/qt/qrcodedialog.h
 SOURCES += src/qt/qrcodedialog.cpp
 FORMS += src/qt/forms/qrcodedialog.ui
+}
+
+contains(BITCOIN_QT_TEST, 1) {
+SOURCES += src/qt/test/test_main.cpp \
+    src/qt/test/urltests.cpp
+HEADERS += src/qt/test/urltests.h
+DEPENDPATH += src/qt/test
+QT += testlib
+TARGET = bitcoin-qt_test
+DEFINES += BITCOIN_QT_TEST
 }
 
 CODECFORTR = UTF-8

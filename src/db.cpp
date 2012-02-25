@@ -1,11 +1,12 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 
 #include "headers.h"
 #include "db.h"
 #include "net.h"
+#include <boost/version.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 
@@ -860,13 +861,19 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
                 {
                     CPrivKey pkey;
                     ssValue >> pkey;
+                    key.SetPubKey(vchPubKey);
                     key.SetPrivKey(pkey);
+                    if (key.GetPubKey() != vchPubKey || !key.IsValid())
+                        return DB_CORRUPT;
                 }
                 else
                 {
                     CWalletKey wkey;
                     ssValue >> wkey;
+                    key.SetPubKey(vchPubKey);
                     key.SetPrivKey(wkey.vchPrivKey);
+                    if (key.GetPubKey() != vchPubKey || !key.IsValid())
+                        return DB_CORRUPT;
                 }
                 if (!pwallet->LoadKey(key))
                     return DB_CORRUPT;
@@ -933,6 +940,7 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
                 ssValue >> nMinVersion;
                 if (nMinVersion > CLIENT_VERSION)
                     return DB_TOO_NEW;
+                pwallet->LoadMinVersion(nMinVersion);
             }
             else if (strType == "cscript")
             {
@@ -940,7 +948,7 @@ int CWalletDB::LoadWallet(CWallet* pwallet)
                 ssKey >> hash;
                 CScript script;
                 ssValue >> script;
-                if (!pwallet->LoadCScript(hash, script))
+                if (!pwallet->LoadCScript(script))
                     return DB_CORRUPT;
             }
         }
@@ -984,7 +992,7 @@ void ThreadFlushWalletDB(void* parg)
     if (fOneThread)
         return;
     fOneThread = true;
-    if (mapArgs.count("-noflushwallet"))
+    if (!GetBoolArg("-flushwallet", true))
         return;
 
     unsigned int nLastSeen = nWalletDBUpdated;
@@ -1058,14 +1066,19 @@ bool BackupWallet(const CWallet& wallet, const string& strDest)
                 filesystem::path pathDest(strDest);
                 if (filesystem::is_directory(pathDest))
                     pathDest = pathDest / wallet.strWalletFile;
-#if BOOST_VERSION >= 104000
-                filesystem::copy_file(pathSrc, pathDest, filesystem::copy_option::overwrite_if_exists);
-#else
-                filesystem::copy_file(pathSrc, pathDest);
-#endif
-                printf("copied wallet.dat to %s\n", pathDest.string().c_str());
 
-                return true;
+                try {
+#if BOOST_VERSION >= 104000
+                    filesystem::copy_file(pathSrc, pathDest, filesystem::copy_option::overwrite_if_exists);
+#else
+                    filesystem::copy_file(pathSrc, pathDest);
+#endif
+                    printf("copied wallet.dat to %s\n", pathDest.string().c_str());
+                    return true;
+                } catch(const filesystem::filesystem_error &e) {
+                    printf("error copying wallet.dat to %s - %s\n", pathDest.string().c_str(), e.what());
+                    return false;
+                }
             }
         }
         Sleep(100);

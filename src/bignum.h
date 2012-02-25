@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #ifndef BITCOIN_BIGNUM_H
@@ -243,7 +243,7 @@ public:
     std::vector<unsigned char> getvch() const
     {
         unsigned int nSize = BN_bn2mpi(this, NULL);
-        if (nSize < 4)
+        if (nSize <= 4)
             return std::vector<unsigned char>();
         std::vector<unsigned char> vch(nSize);
         BN_bn2mpi(this, &vch[0]);

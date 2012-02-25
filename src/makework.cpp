@@ -51,7 +51,7 @@ void CMakeWork::GetWork(WorkDesc &work)
     }
 
     // Update nTime
-    pCurBlock->nTime = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
+    pCurBlock->UpdateTime(pindexPrev);
     pCurBlock->nNonce = 0;
 
     // Update nExtraNonce
@@ -77,7 +77,7 @@ void CMakeWork::GetWorkEx(WorkDescEx &work)
     }
 
     // Update nTime
-    pCurBlock->nTime = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
+    pCurBlock->UpdateTime(pindexPrev);
     pCurBlock->nNonce = 0;
 
     // Update nExtraNonce

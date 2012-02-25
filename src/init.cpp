@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2011 The Bitcoin developers
+// Copyright (c) 2009-2012 The Bitcoin developers
 // Distributed under the MIT/X11 software license, see the accompanying
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 #include "headers.h"
@@ -22,6 +22,7 @@ Q_IMPORT_PLUGIN(qcncodecs)
 Q_IMPORT_PLUGIN(qjpcodecs)
 Q_IMPORT_PLUGIN(qtwcodecs)
 Q_IMPORT_PLUGIN(qkrcodecs)
+Q_IMPORT_PLUGIN(qtaccessiblewidgets)
 #endif
 
 using namespace std;
@@ -188,33 +189,37 @@ bool AppInit2(int argc, char* argv[])
             "  -gen             \t\t  " + _("Generate coins") + "\n" +
             "  -gen=0           \t\t  " + _("Don't generate coins") + "\n" +
             "  -min             \t\t  " + _("Start minimized") + "\n" +
+            "  -splash          \t\t  " + _("Show splash screen on startup (default: 1)") + "\n" +
             "  -datadir=<dir>   \t\t  " + _("Specify data directory") + "\n" +
             "  -timeout=<n>     \t  "   + _("Specify connection timeout (in milliseconds)") + "\n" +
             "  -proxy=<ip:port> \t  "   + _("Connect through socks4 proxy") + "\n" +
             "  -dns             \t  "   + _("Allow DNS lookups for addnode and connect") + "\n" +
             "  -port=<port>     \t\t  " + _("Listen for connections on <port> (default: 8333 or testnet: 18333)") + "\n" +
             "  -maxconnections=<n>\t  " + _("Maintain at most <n> connections to peers (default: 125)") + "\n" +
-            "  -addnode=<ip>    \t  "   + _("Add a node to connect to") + "\n" +
+            "  -addnode=<ip>    \t  "   + _("Add a node to connect to and attempt to keep the connection open") + "\n" +
             "  -connect=<ip>    \t\t  " + _("Connect only to the specified node") + "\n" +
-            "  -noirc           \t  "   + _("Don't find peers using internet relay chat") + "\n" +
-            "  -nolisten        \t  "   + _("Don't accept connections from outside") + "\n" +
-            "  -nodnsseed       \t  "   + _("Don't bootstrap list of peers using DNS") + "\n" +
+            "  -irc             \t  "   + _("Find peers using internet relay chat (default: 0)") + "\n" +
+            "  -listen          \t  "   + _("Accept connections from outside (default: 1)") + "\n" +
+#ifdef QT_GUI
+            "  -lang=<lang>     \t\t  " + _("Set language, for example \"de_DE\" (default: system locale)") + "\n" +
+#endif
+            "  -dnsseed         \t  "   + _("Find peers using DNS lookup (default: 1)") + "\n" +
             "  -banscore=<n>    \t  "   + _("Threshold for disconnecting misbehaving peers (default: 100)") + "\n" +
             "  -bantime=<n>     \t  "   + _("Number of seconds to keep misbehaving peers from reconnecting (default: 86400)") + "\n" +
             "  -maxreceivebuffer=<n>\t  " + _("Maximum per-connection receive buffer, <n>*1000 bytes (default: 10000)") + "\n" +
             "  -maxsendbuffer=<n>\t  "   + _("Maximum per-connection send buffer, <n>*1000 bytes (default: 10000)") + "\n" +
 #ifdef USE_UPNP
 #if USE_UPNP
-            "  -noupnp          \t  "   + _("Don't attempt to use UPnP to map the listening port") + "\n" +
+            "  -upnp            \t  "   + _("Use Universal Plug and Play to map the listening port (default: 1)") + "\n" +
 #else
-            "  -upnp            \t  "   + _("Attempt to use UPnP to map the listening port") + "\n" +
+            "  -upnp            \t  "   + _("Use Universal Plug and Play to map the listening port (default: 0)") + "\n" +
 #endif
 #endif
             "  -paytxfee=<amt>  \t  "   + _("Fee per KB to add to transactions you send") + "\n" +
-#ifdef GUI
+#ifdef QT_GUI
             "  -server          \t\t  " + _("Accept command line and JSON-RPC commands") + "\n" +
 #endif
-#ifndef WIN32
+#if !defined(WIN32) && !defined(QT_GUI)
             "  -daemon          \t\t  " + _("Run in the background as a daemon and accept commands") + "\n" +
 #endif
             "  -testnet         \t\t  " + _("Use the test network") + "\n" +
@@ -229,7 +234,7 @@ bool AppInit2(int argc, char* argv[])
             "  -rpcport=<port>  \t\t  " + _("Listen for JSON-RPC connections on <port> (default: 8332)") + "\n" +
             "  -rpcallowip=<ip> \t\t  " + _("Allow JSON-RPC connections from specified IP address") + "\n" +
             "  -rpcconnect=<ip> \t  "   + _("Send commands to node running on <ip> (default: 127.0.0.1)") + "\n" +
-            "  -blocknotify=<cmd>  "     + _("Execute this command when the best block changes") + "\n" +
+            "  -blocknotify=<cmd> "     + _("Execute command when the best block changes (%s in cmd is replaced by block hash)") + "\n" +
             "  -keypool=<n>     \t  "   + _("Set key pool size to <n> (default: 100)") + "\n" +
             "  -rescan          \t  "   + _("Rescan the block chain for missing wallet transactions") + "\n";
 
@@ -247,14 +252,24 @@ bool AppInit2(int argc, char* argv[])
 
         // Remove tabs
         strUsage.erase(std::remove(strUsage.begin(), strUsage.end(), '\t'), strUsage.end());
+#if defined(QT_GUI) && defined(WIN32)
+        // On windows, show a message box, as there is no stderr
+        wxMessageBox(strUsage, "Usage");
+#else
         fprintf(stderr, "%s", strUsage.c_str());
+#endif
         return false;
     }
 
     fTestNet = GetBoolArg("-testnet");
+    if (fTestNet)
+    {
+        SoftSetBoolArg("-irc", true);
+    }
+
     fDebug = GetBoolArg("-debug");
 
-#ifndef WIN32
+#if !defined(WIN32) && !defined(QT_GUI)
     fDaemon = GetBoolArg("-daemon");
 #else
     fDaemon = false;
@@ -275,7 +290,7 @@ bool AppInit2(int argc, char* argv[])
 
 #ifndef QT_GUI
     for (int i = 1; i < argc; i++)
-        if (!IsSwitchChar(argv[i][0]))
+        if (!IsSwitchChar(argv[i][0]) && !(strlen(argv[i]) > 7 && strncasecmp(argv[i], "bitcoin:", 8) == 0))
             fCommandLine = true;
 
     if (fCommandLine)
@@ -285,7 +300,7 @@ bool AppInit2(int argc, char* argv[])
     }
 #endif
 
-#ifndef WIN32
+#if !defined(WIN32) && !defined(QT_GUI)
     if (fDaemon)
     {
         // Daemonize
@@ -468,7 +483,7 @@ bool AppInit2(int argc, char* argv[])
     if (mapArgs.count("-proxy"))
     {
         fUseProxy = true;
-        addrProxy = CAddress(mapArgs["-proxy"]);
+        addrProxy = CService(mapArgs["-proxy"], 9050);
         if (!addrProxy.IsValid())
         {
             wxMessageBox(_("Invalid -proxy address"), "Bitcoin");
@@ -476,32 +491,46 @@ bool AppInit2(int argc, char* argv[])
         }
     }
 
-    bool fTor = (fUseProxy && addrProxy.port == htons(9050));
+    bool fTor = (fUseProxy && addrProxy.GetPort() == 9050);
     if (fTor)
     {
-        // Use SoftSetArg here so user can override any of these if they wish.
+        // Use SoftSetBoolArg here so user can override any of these if they wish.
         // Note: the GetBoolArg() calls for all of these must happen later.
-        SoftSetArg("-nolisten", true);
-        SoftSetArg("-noirc", true);
-        SoftSetArg("-nodnsseed", true);
-        SoftSetArg("-noupnp", true);
-        SoftSetArg("-upnp", false);
-        SoftSetArg("-dns", false);
+        SoftSetBoolArg("-listen", false);
+        SoftSetBoolArg("-irc", false);
+        SoftSetBoolArg("-dnsseed", false);
+        SoftSetBoolArg("-upnp", false);
+        SoftSetBoolArg("-dns", false);
     }
 
     fAllowDNS = GetBoolArg("-dns");
-    fNoListen = GetBoolArg("-nolisten");
+    fNoListen = !GetBoolArg("-listen", true);
 
-    if (fHaveUPnP)
+    // This code can be removed once a super-majority of the network has upgraded.
+    if (GetBoolArg("-bip16", true))
     {
-#if USE_UPNP
-    if (GetBoolArg("-noupnp"))
-        fUseUPnP = false;
-#else
-    if (GetBoolArg("-upnp"))
-        fUseUPnP = true;
-#endif
+        if (fTestNet)
+            SoftSetArg("-paytoscripthashtime", "1329264000"); // Feb 15
+        else
+            SoftSetArg("-paytoscripthashtime", "1330578000"); // Mar 1
+
+        // Put "/P2SH/" in the coinbase so everybody can tell when
+        // a majority of miners support it
+        const char* pszP2SH = "/P2SH/";
+        COINBASE_FLAGS << std::vector<unsigned char>(pszP2SH, pszP2SH+strlen(pszP2SH));
     }
+    else
+    {
+        const char* pszP2SH = "NOP2SH";
+        COINBASE_FLAGS << std::vector<unsigned char>(pszP2SH, pszP2SH+strlen(pszP2SH));
+    }
+
+    // Command-line args override in-wallet settings:
+#if USE_UPNP
+    fUseUPnP = GetBoolArg("-upnp", true);
+#else
+    fUseUPnP = GetBoolArg("-upnp", false);
+#endif
 
     if (!fNoListen)
     {
@@ -517,7 +546,7 @@ bool AppInit2(int argc, char* argv[])
     {
         BOOST_FOREACH(string strAddr, mapMultiArgs["-addnode"])
         {
-            CAddress addr(strAddr, fAllowDNS);
+            CAddress addr(CService(strAddr, GetDefaultPort(), fAllowDNS));
             addr.nTime = 0; // so it won't relay unless successfully connected
             if (addr.IsValid())
                 AddAddress(addr);

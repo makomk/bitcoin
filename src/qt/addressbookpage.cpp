@@ -2,13 +2,13 @@
 #include "ui_addressbookpage.h"
 
 #include "addresstablemodel.h"
+#include "bitcoingui.h"
 #include "editaddressdialog.h"
 #include "csvmodelwriter.h"
 #include "guiutil.h"
 
 #include <QSortFilterProxyModel>
 #include <QClipboard>
-#include <QFileDialog>
 #include <QMessageBox>
 #include <QMenu>
 
@@ -156,6 +156,24 @@ void AddressBookPage::onEditAction()
     dlg.exec();
 }
 
+void AddressBookPage::on_signMessage_clicked()
+{
+    QTableView *table = ui->tableView;
+    QModelIndexList indexes = table->selectionModel()->selectedRows(AddressTableModel::Address);
+    QString addr;
+
+    foreach (QModelIndex index, indexes)
+    {
+        QVariant address = index.data();
+        addr = address.toString();
+    }
+
+    QObject *qoGUI = parent()->parent();
+    BitcoinGUI *gui = qobject_cast<BitcoinGUI *>(qoGUI);
+    if (gui)
+        gui->gotoMessagePage(addr);
+}
+
 void AddressBookPage::on_newAddressButton_clicked()
 {
     if(!model)
@@ -207,11 +225,13 @@ void AddressBookPage::selectionChanged()
             // In sending tab, allow deletion of selection
             ui->deleteButton->setEnabled(true);
             deleteAction->setEnabled(true);
+            ui->signMessage->setEnabled(false);
             break;
         case ReceivingTab:
             // Deleting receiving addresses, however, is not allowed
             ui->deleteButton->setEnabled(false);
             deleteAction->setEnabled(false);
+            ui->signMessage->setEnabled(true);
             break;
         }
         ui->copyToClipboard->setEnabled(true);
@@ -222,6 +242,7 @@ void AddressBookPage::selectionChanged()
         ui->deleteButton->setEnabled(false);
         ui->showQRCode->setEnabled(false);
         ui->copyToClipboard->setEnabled(false);
+        ui->signMessage->setEnabled(false);
     }
 }
 
@@ -255,10 +276,9 @@ void AddressBookPage::done(int retval)
 void AddressBookPage::exportClicked()
 {
     // CSV is currently the only supported format
-    QString filename = QFileDialog::getSaveFileName(
+    QString filename = GUIUtil::getSaveFileName(
             this,
-            tr("Export Address Book Data"),
-            QDir::currentPath(),
+            tr("Export Address Book Data"), QString(),
             tr("Comma separated file (*.csv)"));
 
     if (filename.isNull()) return;
