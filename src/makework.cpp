@@ -55,7 +55,6 @@ void CMakeWork::GetWork(WorkDesc &work)
     pCurBlock->nNonce = 0;
 
     // Update nExtraNonce
-    static unsigned int nExtraNonce = 0;
     IncrementExtraNonce(pCurBlock, pindexPrev, nExtraNonce);
 
     // Save
@@ -81,7 +80,6 @@ void CMakeWork::GetWorkEx(WorkDescEx &work)
     pCurBlock->nNonce = 0;
 
     // Update nExtraNonce
-    static unsigned int nExtraNonce = 0;
     IncrementExtraNonce(pCurBlock, pindexPrev, nExtraNonce);
 
     // Save
@@ -119,12 +117,15 @@ bool CMakeWork::SubmitWorkEx(unsigned char *data, const std::vector<unsigned cha
 
     pblock->nTime = pdata->nTime;
     pblock->nNonce = pdata->nNonce;
+    CTransaction saveCoinbase = pblock->vtx[0];
     if(coinbase.size() == 0)
         pblock->vtx[0].vin[0].scriptSig = mapNewBlock[pdata->hashMerkleRoot].second;
     else
-        CDataStream(coinbase) >> pblock->vtx[0]; // FIXME - HACK!
+        CDataStream(coinbase) >> pblock->vtx[0];
 
     pblock->hashMerkleRoot = pblock->BuildMerkleTree();
 
-    return CheckWork(pblock, *pwalletMain, reservekey);
+    bool ret = CheckWork(pblock, *pwalletMain, reservekey);
+    pblock->vtx[0] = saveCoinbase;
+    return ret;
 }
